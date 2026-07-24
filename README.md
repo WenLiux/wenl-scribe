@@ -126,6 +126,9 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-portable.ps1
 - [常见问题与故障排查](docs/TROUBLESHOOTING.md)
 - [隐私说明](PRIVACY.md)
 - [安全政策](SECURITY.md)
+- [商业使用说明](COMMERCIAL_USE.md)
+- [品牌与标识权利](TRADEMARKS.md)
+- [第三方软件说明](THIRD_PARTY_NOTICES.md)
 - [贡献指南](CONTRIBUTING.md)
 - [版本记录](CHANGELOG.md)
 - [发布前检查清单](docs/PUBLISH_CHECKLIST.md)
@@ -144,4 +147,14 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-portable.ps1
 
 ## 许可证
 
-许可证将在首次公开发布前由项目维护者确认。没有许可证时，源代码默认仍受版权保护；请勿自行复制、分发或制作衍生版本。
+留文采用**源码公开、仅限非商业使用（Source Available for Noncommercial Use）**的发布方式，不属于符合 OSI 定义的开源软件。
+
+留文自有源代码依据 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供。允许许可证规定的非商业使用、修改和分发；未经项目权利人事先书面授权，不得用于商业目的。再分发时必须按许可证要求同时提供 `LICENSE` 和 [NOTICE](NOTICE)。
+
+“留文”、“WENL”、“WENL Scribe”、Logo、图标和品牌资产不包含在源代码许可中。修改版或分支项目必须更名、更换品牌视觉，并明确说明其不是留文官方版本。详见 [品牌与标识权利声明](TRADEMARKS.md)。
+
+留文不主张用户导入内容、逐字稿、总结或导出 Markdown 文件的著作权；但用户仍须确保有权处理相关内容。输出内容归属与软件能否用于商业目的相互独立，详见 [商业使用与用户输出说明](COMMERCIAL_USE.md)。
+
+第三方组件继续适用其各自许可证，详见 [第三方软件与素材说明](THIRD_PARTY_NOTICES.md)。
+
+> The original source code in WENL Scribe is available under the PolyForm Noncommercial License 1.0.0. Commercial use requires prior written authorization. Project names, logos, icons and brand assets are excluded from the source-code license.

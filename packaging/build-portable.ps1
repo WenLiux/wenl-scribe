@@ -34,6 +34,15 @@ if (Test-Path -LiteralPath $portableRoot) {
 New-Item -ItemType Directory -Force -Path $portableRoot | Out-Null
 Copy-Item -Recurse -Force -Path (Join-Path $root "dist\WENL Scribe\*") -Destination $portableRoot
 Copy-Item -Force -Path (Join-Path $root "packaging\便携版使用说明.txt") -Destination $portableRoot
+foreach ($legalFile in @(
+  "LICENSE",
+  "NOTICE",
+  "COMMERCIAL_USE.md",
+  "TRADEMARKS.md",
+  "THIRD_PARTY_NOTICES.md"
+)) {
+  Copy-Item -Force -Path (Join-Path $root $legalFile) -Destination $portableRoot
+}
 
 $archive = Join-Path $releaseRoot "WENL-Scribe-Portable-v$version-win-x64.zip"
 if (Test-Path -LiteralPath $archive) {
