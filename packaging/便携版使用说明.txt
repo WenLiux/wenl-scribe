@@ -26,4 +26,4 @@
 - 商业使用需要事先取得书面授权。
 - “留文”、WENL、WENL Scribe、Logo 和图标不包含在源代码许可中。
 - 留文不主张用户输入、逐字稿、总结和导出文件的著作权；使用者仍须确保有权处理相关内容。
-- 请阅读压缩包内的 LICENSE、NOTICE、COMMERCIAL_USE.md、TRADEMARKS.md 和 THIRD_PARTY_NOTICES.md。
+- 请阅读压缩包内的 LICENSE、NOTICE 和 docs\legal 目录。

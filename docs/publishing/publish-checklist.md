@@ -21,7 +21,7 @@
 - 第三方组件：继续适用其原始许可证；
 - 外部贡献：合并前必须完成贡献者许可确认。
 
-`COMMERCIAL_USE.md`、`TRADEMARKS.md` 等说明文件不得修改或替代 `LICENSE` 正文。
+`docs/legal/commercial-use.md`、`docs/legal/trademarks.md` 等说明文件不得修改或替代 `LICENSE` 正文。
 
 ## 代码与隐私
 
@@ -67,8 +67,8 @@
 - [ ] Actions 首次运行通过
 - [ ] Bug／功能建议模板显示正常
 - [x] 已添加未经修改的标准 `LICENSE`
-- [x] 已添加 `NOTICE`、`COMMERCIAL_USE.md` 和 `TRADEMARKS.md`
-- [x] 已添加 `CONTRIBUTOR_LICENSE_AGREEMENT.md` 并更新 PR 模板
+- [x] 已添加 `NOTICE`、`docs/legal/commercial-use.md` 和 `docs/legal/trademarks.md`
+- [x] 已添加 `docs/legal/contributor-license-agreement.md` 并更新 PR 模板
 - [ ] 按最终发行包完成第三方依赖、PyAV/FFmpeg 和 LGPL 组件许可审查
 - [ ] 将真实个人姓名或公司主体补充到正式商业合同与商标申请资料
 - [ ] 检索并评估“留文”、WENL、WENL Scribe 与 Logo 的商标注册
@@ -80,7 +80,7 @@
 - [ ] 更新版本号和 `CHANGELOG.md`
 - [ ] 重新构建便携包
 - [ ] 实际从最终 ZIP 解压并启动
-- [ ] 确认 ZIP 包含 `LICENSE`、`NOTICE`、商业使用、品牌和第三方许可说明
+- [ ] 确认 ZIP 包含 `LICENSE`、`NOTICE` 和 `docs/legal` 许可说明目录
 - [ ] 计算 SHA-256
 - [ ] Release 先保存为 Draft
 - [ ] 上传便携包和校验文件

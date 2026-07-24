@@ -33,7 +33,7 @@ npm.cmd run lint
 
 ## Pull Request
 
-提交 Pull Request 前，请先阅读并同意 [贡献者许可协议](CONTRIBUTOR_LICENSE_AGREEMENT.md)。该协议不转让贡献者的所有权，但允许项目维护者继续维护公开非商业版本，并在必要时对包含该贡献的版本进行单独商业授权。
+提交 Pull Request 前，请先阅读并同意 [贡献者许可协议](docs/legal/contributor-license-agreement.md)。该协议不转让贡献者的所有权，但允许项目维护者继续维护公开非商业版本，并在必要时对包含该贡献的版本进行单独商业授权。
 
 如果贡献属于雇主、客户或其他实体，请先取得有权代表该实体作出的授权。权属不清、无法完成许可确认或包含未标明第三方内容的贡献不会被合并。
 

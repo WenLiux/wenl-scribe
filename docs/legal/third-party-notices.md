@@ -1,6 +1,6 @@
 # 第三方软件与素材说明
 
-留文包含、依赖或在构建过程中使用第三方软件。第三方软件继续适用其各自许可证，不因留文采用 [PolyForm Noncommercial License 1.0.0](LICENSE) 而改变。
+留文包含、依赖或在构建过程中使用第三方软件。第三方软件继续适用其各自许可证，不因留文采用 [PolyForm Noncommercial License 1.0.0](../../LICENSE) 而改变。
 
 本文件记录当前项目和 Windows 便携版中的主要第三方组件。`package-lock.json`、Python 安装包元数据及最终构建产物中的许可文件共同构成依赖审查依据。发布新版本前必须按实际锁定版本重新核对。
 

@@ -4,7 +4,7 @@
 
 ## 受保护的名称与资产
 
-以下名称和资产不包含在 [PolyForm Noncommercial License 1.0.0](LICENSE) 的授权范围内：
+以下名称和资产不包含在 [PolyForm Noncommercial License 1.0.0](../../LICENSE) 的授权范围内：
 
 - “留文”；
 - “WENL”与“WENL Scribe”；
@@ -44,6 +44,6 @@
 
 本政策是项目的品牌使用规则，不代表其中每个文字、颜色或视觉元素都已在所有司法辖区完成商标注册。具体权利范围以适用法律、实际使用情况和已经取得的注册权利为准。
 
-如需商业或品牌授权，请参阅 [COMMERCIAL_USE.md](COMMERCIAL_USE.md)。
+如需商业或品牌授权，请参阅 [商业使用与用户输出说明](commercial-use.md)。
 
 Copyright © 2026 WenLiux. All rights reserved.

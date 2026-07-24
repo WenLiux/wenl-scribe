@@ -4,8 +4,8 @@
 
 请先阅读：
 
-- `docs/USER_GUIDE.md`
-- `docs/TROUBLESHOOTING.md`
+- `docs/user/user-guide.md`
+- `docs/user/troubleshooting.md`
 
 仍无法解决时，请使用 GitHub Issue 的“Bug 反馈”模板。
 

@@ -46,7 +46,7 @@
 
 Windows 可能显示“未知发布者”，因为当前内测版本尚未完成代码签名。请只使用本仓库 Release 页面提供的文件。
 
-详细说明请阅读 [Windows 用户指南](docs/USER_GUIDE.md) 和 [常见问题](docs/TROUBLESHOOTING.md)。
+详细说明请阅读 [Windows 用户指南](docs/user/user-guide.md) 和 [常见问题](docs/user/troubleshooting.md)。
 
 ## 从源码运行
 
@@ -122,16 +122,13 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-portable.ps1
 
 ## 文档
 
-- [Windows 用户指南](docs/USER_GUIDE.md)
-- [常见问题与故障排查](docs/TROUBLESHOOTING.md)
+- [文档中心](docs/README.md)
+- [Windows 用户指南](docs/user/user-guide.md)
+- [常见问题与故障排查](docs/user/troubleshooting.md)
 - [隐私说明](PRIVACY.md)
 - [安全政策](SECURITY.md)
-- [商业使用说明](COMMERCIAL_USE.md)
-- [品牌与标识权利](TRADEMARKS.md)
-- [第三方软件说明](THIRD_PARTY_NOTICES.md)
 - [贡献指南](CONTRIBUTING.md)
 - [版本记录](CHANGELOG.md)
-- [发布前检查清单](docs/PUBLISH_CHECKLIST.md)
 
 ## 反馈
 
@@ -151,10 +148,10 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-portable.ps1
 
 留文自有源代码依据 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供。允许许可证规定的非商业使用、修改和分发；未经项目权利人事先书面授权，不得用于商业目的。再分发时必须按许可证要求同时提供 `LICENSE` 和 [NOTICE](NOTICE)。
 
-“留文”、“WENL”、“WENL Scribe”、Logo、图标和品牌资产不包含在源代码许可中。修改版或分支项目必须更名、更换品牌视觉，并明确说明其不是留文官方版本。详见 [品牌与标识权利声明](TRADEMARKS.md)。
+“留文”、“WENL”、“WENL Scribe”、Logo、图标和品牌资产不包含在源代码许可中。修改版或分支项目必须更名、更换品牌视觉，并明确说明其不是留文官方版本。详见 [品牌与标识权利声明](docs/legal/trademarks.md)。
 
-留文不主张用户导入内容、逐字稿、总结或导出 Markdown 文件的著作权；但用户仍须确保有权处理相关内容。输出内容归属与软件能否用于商业目的相互独立，详见 [商业使用与用户输出说明](COMMERCIAL_USE.md)。
+留文不主张用户导入内容、逐字稿、总结或导出 Markdown 文件的著作权；但用户仍须确保有权处理相关内容。输出内容归属与软件能否用于商业目的相互独立，详见 [商业使用与用户输出说明](docs/legal/commercial-use.md)。
 
-第三方组件继续适用其各自许可证，详见 [第三方软件与素材说明](THIRD_PARTY_NOTICES.md)。
+第三方组件继续适用其各自许可证，详见 [第三方软件与素材说明](docs/legal/third-party-notices.md)。
 
 > The original source code in WENL Scribe is available under the PolyForm Noncommercial License 1.0.0. Commercial use requires prior written authorization. Project names, logos, icons and brand assets are excluded from the source-code license.

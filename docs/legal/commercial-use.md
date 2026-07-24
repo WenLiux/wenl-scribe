@@ -1,6 +1,6 @@
 # 商业使用与用户输出说明
 
-留文采用“源码公开、仅限非商业使用”的发布方式。留文自有源代码依据 [PolyForm Noncommercial License 1.0.0](LICENSE) 提供。
+留文采用“源码公开、仅限非商业使用”的发布方式。留文自有源代码依据 [PolyForm Noncommercial License 1.0.0](../../LICENSE) 提供。
 
 本文件只用于帮助理解常见场景，不是对 `LICENSE` 的修改、补充或替代，也不单独授予任何权利。如本文件与 `LICENSE` 存在冲突，以 `LICENSE` 正文为准。
 
