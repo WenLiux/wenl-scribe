@@ -1,0 +1,34 @@
+name: 功能建议
+description: 提议新的能力或体验改进
+title: "[Feature] "
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 请说明谁在什么情况下遇到了什么问题。
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的解决方式
+      description: 描述你希望留文如何工作，不必给出技术方案。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 尝试过的替代方法
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 可附界面草图或公开示例，请勿包含隐私数据。
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，没有发现相同建议。
+          required: true

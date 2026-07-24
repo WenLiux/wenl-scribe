@@ -1,0 +1,74 @@
+name: Bug 反馈
+description: 报告可以稳定复现的问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先移除日志、截图和链接中的 API Key、Cookie、手机号等敏感信息。
+  - type: dropdown
+    id: install
+    attributes:
+      label: 使用方式
+      options:
+        - Windows 便携版
+        - 源码开发模式
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 留文版本
+      placeholder: 例如 v0.6.1
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: 系统环境
+      placeholder: 例如 Windows 11 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: 视频来源
+      description: 可填写平台和链接类型；公开视频链接可直接附上，私密链接请勿提交。
+      placeholder: 例如 B 站普通分享链接
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 粘贴……
+        3. 点击……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 日志或诊断信息
+      description: 请先删除密钥、Cookie 和其他隐私数据，再粘贴文字或上传文件。
+      render: shell
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，没有发现相同问题。
+          required: true
+        - label: 我已确认提交内容不含 API Key、Cookie 或其他敏感信息。
+          required: true
