@@ -51,8 +51,18 @@ class BackendV04Tests(unittest.TestCase):
         ]
         match = server.locate_evidence("需要观察居民收入", segments)
         self.assertIsNotNone(match)
-        self.assertEqual(match["start"], 10.0)
+        self.assertEqual(match["start"], 12.0)
         self.assertEqual(match["end"], 19.0)
+
+    def test_evidence_in_later_segment_does_not_seek_to_earlier_window(self):
+        segments = [
+            {"start": 0, "end": 4, "text": "这是上一段铺垫", "source": "test"},
+            {"start": 4, "end": 8, "text": "这里才是核心观点", "source": "test"},
+        ]
+        match = server.locate_evidence("这里才是核心观点", segments)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["start"], 4.0)
+        self.assertEqual(match["segment_start"], 1)
 
     def test_summary_rejects_unverified_claims(self):
         segments = [{"start": 0, "end": 5, "text": "原文只说明短期保持稳定。", "source": "test"}]

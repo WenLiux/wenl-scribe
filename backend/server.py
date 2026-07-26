@@ -561,22 +561,45 @@ def locate_evidence(quote, segments):
     needle = compact_text(quote)
     if len(needle) < 6:
         return None
-    for index, segment in enumerate(segments):
-        combined = ""
-        for end_index in range(index, min(index + 4, len(segments))):
-            combined += compact_text(segments[end_index].get("text"))
-            if needle in combined:
-                start = segments[index].get("start")
-                end = segments[end_index].get("end")
-                context_start = max(0, index - 1)
-                context_end = min(len(segments), end_index + 2)
-                return {
-                    "start": start,
-                    "end": end,
-                    "context": " ".join(item["text"] for item in segments[context_start:context_end]),
-                    "segment_start": index,
-                    "segment_end": end_index,
-                }
+    compact_segments = [compact_text(segment.get("text")) for segment in segments]
+    transcript = "".join(compact_segments)
+    evidence_offset = transcript.find(needle)
+    if evidence_offset < 0:
+        return None
+
+    cursor = 0
+    start_index = None
+    start = None
+    end_index = None
+    end = None
+    evidence_end = evidence_offset + len(needle)
+    for index, (segment, text) in enumerate(zip(segments, compact_segments)):
+        segment_end_offset = cursor + len(text)
+        if start_index is None and evidence_offset < segment_end_offset:
+            start_index = index
+            start = segment.get("start")
+            segment_end = segment.get("end")
+            if start is not None and segment_end is not None and segment_end > start and text:
+                progress = max(0.0, min(1.0, (evidence_offset - cursor) / len(text)))
+                start = round(start + (segment_end - start) * progress, 3)
+        if start_index is not None and evidence_end <= segment_end_offset:
+            end_index = index
+            end = segment.get("end")
+            break
+        cursor = segment_end_offset
+
+    if start_index is not None:
+        end_index = end_index if end_index is not None else len(segments) - 1
+        end = end if end is not None else segments[end_index].get("end")
+        context_start = max(0, start_index - 1)
+        context_end = min(len(segments), end_index + 2)
+        return {
+            "start": start,
+            "end": end,
+            "context": " ".join(item["text"] for item in segments[context_start:context_end]),
+            "segment_start": start_index,
+            "segment_end": end_index,
+        }
     return None
 
 
@@ -1020,7 +1043,7 @@ def run_job(job_id, resume="auto"):
         set_stage(job_id, "partial" if task.get("transcript_segments") else "failed", info["message"])
 
 
-def create_job(link, model="large-v3-turbo", summary_mode="auto", language="auto"):
+def create_job(link, model="small", summary_mode="auto", language="auto"):
     if model not in ("small", "medium", "large-v3-turbo"):
         model = "small"
     if summary_mode not in ("auto", "local", "cloud"):
@@ -1499,7 +1522,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/jobs":
                 return self.send_json(202, create_job(
                     link,
-                    payload.get("model", "large-v3-turbo"),
+                    payload.get("model", "small"),
                     payload.get("summary_mode", "auto"),
                     payload.get("language", "auto"),
                 ))
@@ -1508,7 +1531,7 @@ class Handler(BaseHTTPRequestHandler):
             if not segments:
                 temp_job = uuid.uuid4().hex
                 CANCEL_EVENTS[temp_job] = threading.Event()
-                segments, _ = transcribe(temp_job, video, payload.get("model", "large-v3-turbo"), payload.get("language", "auto"), lambda *args: None)
+                segments, _ = transcribe(temp_job, video, payload.get("model", "small"), payload.get("language", "auto"), lambda *args: None)
             transcript = segments_text(segments)
             summary = local_summary(video["title"], transcript, segments)
             job_id = uuid.uuid4().hex

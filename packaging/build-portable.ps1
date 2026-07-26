@@ -33,7 +33,11 @@ if (Test-Path -LiteralPath $portableRoot) {
 }
 New-Item -ItemType Directory -Force -Path $portableRoot | Out-Null
 Copy-Item -Recurse -Force -Path (Join-Path $root "dist\WENL Scribe\*") -Destination $portableRoot
-Copy-Item -Force -Path (Join-Path $root "packaging\便携版使用说明.txt") -Destination $portableRoot
+$usageGuide = Get-ChildItem -LiteralPath (Join-Path $root "packaging") -File -Filter "*.txt" | Select-Object -First 1
+if (-not $usageGuide) {
+  throw "Portable usage guide was not found"
+}
+Copy-Item -Force -LiteralPath $usageGuide.FullName -Destination $portableRoot
 foreach ($legalFile in @("LICENSE", "NOTICE")) {
   Copy-Item -Force -Path (Join-Path $root $legalFile) -Destination $portableRoot
 }
