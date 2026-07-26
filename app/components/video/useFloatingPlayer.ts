@@ -82,7 +82,12 @@ export function useFloatingPlayer({
     previousAutoExpandRef.current = autoExpand;
     preferredExpandedRef.current = autoExpand;
     hasFloatingStateRef.current = true;
-    if (isPastOrigin) setExpanded(autoExpand);
+    if (!isPastOrigin) return;
+
+    const animationFrame = window.requestAnimationFrame(() => {
+      setExpanded(autoExpand);
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
   }, [autoExpand, isPastOrigin]);
 
   const collapseFloatingPlayer = useCallback(() => {

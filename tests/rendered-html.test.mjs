@@ -104,7 +104,8 @@ test("floating player keeps one iframe while its draggable shell changes positio
   assert.match(floatingHook, /preferredExpandedRef/);
   assert.match(floatingHook, /hasFloatingStateRef/);
   assert.match(floatingHook, /setExpanded\(preferredExpandedRef\.current\)/);
-  assert.match(floatingHook, /if \(isPastOrigin\) setExpanded\(autoExpand\)/);
+  assert.match(floatingHook, /requestAnimationFrame\(\(\) => \{\s+setExpanded\(autoExpand\)/);
+  assert.match(floatingHook, /cancelAnimationFrame\(animationFrame\)/);
   assert.match(floatingHook, /passedAbove && !wasPastOrigin/);
   assert.match(page, /floatingPlayerRef\.current\?\.showForTimestamp/);
   assert.match(page, /locateVideo\(seconds\)/);
