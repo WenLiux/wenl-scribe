@@ -1,6 +1,6 @@
 {
   "name": "wenl-scribe",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "本地优先的 B 站视频转录、总结与 Markdown 导出工具",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",

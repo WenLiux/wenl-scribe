@@ -8,6 +8,7 @@ import {
   normalizePage,
   normalizeSeconds,
 } from "../app/components/video/bilibili.ts";
+import { locateEvidenceTimestamp } from "../app/components/video/evidence.ts";
 
 test("validates BV identifiers without accepting surrounding text", () => {
   assert.equal(isValidBvid("BV1xx411c7mD"), true);
@@ -36,4 +37,17 @@ test("formats edge timestamps", () => {
   assert.equal(formatPlayerTimestamp(59), "00:59");
   assert.equal(formatPlayerTimestamp(60), "01:00");
   assert.equal(formatPlayerTimestamp(3600), "01:00:00");
+});
+
+test("locates evidence inside the matching segment instead of an earlier context window", () => {
+  const segments = [
+    { start: 0, end: 4, text: "这是上一段铺垫" },
+    { start: 4, end: 8, text: "这里才是核心观点" },
+  ];
+  assert.equal(locateEvidenceTimestamp("这里才是核心观点", segments, 0), 4);
+});
+
+test("estimates the timestamp when evidence starts midway through a segment", () => {
+  const segments = [{ start: 10, end: 14, text: "政策调整需要观察" }];
+  assert.equal(locateEvidenceTimestamp("需要观察", segments, 10), 12);
 });

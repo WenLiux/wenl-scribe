@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { BRAND_COPY } from "./brand";
 import { FloatingBilibiliPlayer, type FloatingBilibiliPlayerHandle } from "./components/video/FloatingBilibiliPlayer";
+import { locateEvidenceTimestamp } from "./components/video/evidence";
 import { useVideoSeek } from "./components/video/useVideoSeek";
 import type { BilibiliVideoInfo } from "./components/video/types";
 
@@ -28,7 +29,9 @@ type Settings = {
   model: "small" | "medium" | "large-v3-turbo";
   language: "auto" | "zh" | "en";
   summaryMode: "auto" | "local" | "cloud";
+  autoExpandPlayer: boolean;
 };
+type TranscriptionModel = Settings["model"];
 type ApiConfig = {
   provider: "openai" | "gemini" | "sensenova" | "compatible";
   base_url: string;
@@ -50,6 +53,19 @@ const STAGE_LABELS: Record<string, string> = {
   transcribing: "本地转录", cleaning: "整理文字", summarizing: "生成总结", validating: "校验证据", completed: "处理完成",
 };
 const TERMINAL = new Set(["completed", "partial", "failed", "cancelled"]);
+const DEFAULT_SETTINGS: Settings = { model: "small", language: "auto", summaryMode: "auto", autoExpandPlayer: true };
+const FIRST_USE_KEY = "wenl-first-use-v1";
+const SETTINGS_KEY = "wenl-settings-v3";
+const TRANSCRIPTION_MODELS: ReadonlyArray<{
+  value: TranscriptionModel;
+  title: string;
+  description: string;
+  badge: string;
+}> = [
+  { value: "small", title: "Small", description: "下载更快、资源占用较低，适合先体验和普通中文视频。", badge: "默认" },
+  { value: "medium", title: "Medium", description: "准确率与速度更均衡，适合访谈和较复杂内容。", badge: "均衡" },
+  { value: "large-v3-turbo", title: "Large v3 Turbo", description: "中英文和专业词更稳，但下载、内存与处理时间更多。", badge: "准确优先" },
+];
 const STATUS_LABELS: Record<string, string> = { pending: "等待中", processing: "处理中", completed: "已完成", partial: "部分完成", failed: "失败", cancelled: "已取消" };
 const [BRAND_SLOGAN_LEAD, BRAND_SLOGAN_END] = BRAND_COPY.slogan.split("，");
 
@@ -104,10 +120,14 @@ export default function Home() {
   const [apiMessage, setApiMessage] = useState("");
   const [apiBusy, setApiBusy] = useState(false);
   const [resummarizing, setResummarizing] = useState(false);
-  const [settings, setSettings] = useState<Settings>({ model: "large-v3-turbo", language: "auto", summaryMode: "auto" });
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [preflightOpen, setPreflightOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<TranscriptionModel>("small");
+  const [firstUseConfirmed, setFirstUseConfirmed] = useState(false);
+  const [usageChecks, setUsageChecks] = useState({ rights: false, accuracy: false, resources: false });
+  const [apiDecision, setApiDecision] = useState<"configured" | "later" | null>(null);
   const pollRef = useRef<number | null>(null);
   const floatingPlayerRef = useRef<FloatingBilibiliPlayerHandle | null>(null);
-  const seekTimerRef = useRef<number | null>(null);
   const { request: videoSeek, locate: locateVideo, reset: resetVideoSeek } = useVideoSeek(result?.duration);
 
   const loadHistory = useCallback(async () => {
@@ -128,8 +148,19 @@ export default function Home() {
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => {
-      const saved = localStorage.getItem("wenl-settings-v2");
-      if (saved) setSettings({ model: "large-v3-turbo", language: "auto", summaryMode: "auto", ...JSON.parse(saved) });
+      const saved = localStorage.getItem(SETTINGS_KEY);
+      if (saved) {
+        const next = { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+        setSettings(next);
+        setSelectedModel(next.model);
+      } else {
+        const legacy = localStorage.getItem("wenl-settings-v2");
+        const migrated = legacy ? { ...DEFAULT_SETTINGS, ...JSON.parse(legacy), model: "small" } : DEFAULT_SETTINGS;
+        setSettings(migrated);
+        setSelectedModel(migrated.model);
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(migrated));
+      }
+      setFirstUseConfirmed(localStorage.getItem(FIRST_USE_KEY) === "confirmed");
       loadHistory(); loadApiConfig();
     }, 0);
     return () => { window.clearTimeout(loadTimer); if (pollRef.current) window.clearTimeout(pollRef.current); };
@@ -141,26 +172,16 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [task]);
 
-  useEffect(() => {
-    if (seekTimerRef.current !== null) {
-      window.clearTimeout(seekTimerRef.current);
-      seekTimerRef.current = null;
-    }
-    resetVideoSeek();
-  }, [result?.job_id, resetVideoSeek]);
-
-  useEffect(() => () => {
-    if (seekTimerRef.current !== null) window.clearTimeout(seekTimerRef.current);
-  }, []);
+  useEffect(() => resetVideoSeek(), [result?.job_id, resetVideoSeek]);
 
   function handleTimestampClick(seconds: number | null | undefined) {
     if (seconds == null) return;
     floatingPlayerRef.current?.showForTimestamp();
-    if (seekTimerRef.current !== null) window.clearTimeout(seekTimerRef.current);
-    seekTimerRef.current = window.setTimeout(() => {
-      locateVideo(seconds);
-      seekTimerRef.current = null;
-    }, 150);
+    locateVideo(seconds);
+  }
+
+  function claimTimestamp(item: Claim) {
+    return locateEvidenceTimestamp(item.evidence, result?.segments, item.start);
   }
 
   async function pollJob(jobId: string) {
@@ -182,15 +203,22 @@ export default function Home() {
     }
   }
 
-  async function submit(event: FormEvent) {
+  function submit(event: FormEvent) {
     event.preventDefault();
     if (!url.trim()) return;
+    setSelectedModel(settings.model);
+    setUsageChecks({ rights: false, accuracy: false, resources: false });
+    setApiDecision(cloudAvailable ? "configured" : null);
+    setPreflightOpen(true);
+  }
+
+  async function startTranscription(model: TranscriptionModel) {
     if (pollRef.current) window.clearTimeout(pollRef.current);
     setError(""); setResult(null); setElapsed(0);
     try {
       const response = await fetch(`${API}/api/jobs`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim(), model: settings.model, language: settings.language, summary_mode: settings.summaryMode }),
+        body: JSON.stringify({ url: url.trim(), model, language: settings.language, summary_mode: settings.summaryMode }),
       });
       const created = await response.json();
       if (!response.ok) throw new Error(created.error || "无法创建转录任务");
@@ -213,7 +241,30 @@ export default function Home() {
   }
 
   function saveSettings(next: Settings) {
-    setSettings(next); localStorage.setItem("wenl-settings-v2", JSON.stringify(next));
+    setSettings(next); localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+  }
+
+  function confirmFirstUse() {
+    localStorage.setItem(FIRST_USE_KEY, "confirmed");
+    setFirstUseConfirmed(true);
+  }
+
+  async function confirmTranscription() {
+    if (!firstUseConfirmed) {
+      if (!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources || !apiDecision) return;
+      confirmFirstUse();
+    }
+    saveSettings({ ...settings, model: selectedModel });
+    setPreflightOpen(false);
+    await startTranscription(selectedModel);
+  }
+
+  function openApiSettingsFromPreflight() {
+    if (!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources) return;
+    confirmFirstUse();
+    setPreflightOpen(false);
+    setView("settings");
+    setApiMessage("可在这里配置总结 API；保存后回到首页开始转录。");
   }
 
   async function copyCurrent() {
@@ -393,12 +444,13 @@ export default function Home() {
             startTime={videoSeek.seconds}
             autoplay={videoSeek.autoplay}
             reloadKey={videoSeek.version}
+            autoExpand={settings.autoExpandPlayer}
             side={active === "transcript" ? "right" : "left"}
           />
         </div>
         <div className="toolbar">
           <div className="tabs" role="tablist"><button className={active === "summary" ? "active" : ""} onClick={() => setActive("summary")}>内容总结</button><button className={active === "transcript" ? "active" : ""} onClick={() => setActive("transcript")}>完整转录</button></div>
-          <div className="actions"><button className="copy" onClick={copyCurrent}>{copied ? "已复制" : "复制"}</button><a className="download" href={downloadUrl}>下载 Markdown</a><a className="copy" href={`${API}/api/download/diagnostics?job_id=${result.job_id}`}>诊断</a></div>
+          <div className="actions"><label className="autoFloatToggle" title="控制新打开任务首次下滑时是否默认展开悬浮播放器"><input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} /><span>默认弹出视频</span></label><button className="copy" onClick={copyCurrent}>{copied ? "已复制" : "复制"}</button><a className="download" href={downloadUrl}>下载 Markdown</a><a className="copy" href={`${API}/api/download/diagnostics?job_id=${result.job_id}`}>诊断</a></div>
         </div>
         {active === "summary" ? <div className="summaryPage">
           <div className={`summaryNotice ${result.summary_type || "extractive"}`}>
@@ -413,7 +465,7 @@ export default function Home() {
             <div className="claimHead"><span>{String(index + 1).padStart(2, "0")}</span><small>{item.kind}</small>{item.verified === false && <small className="unverified">旧数据未校验</small>}</div>
             <p className="claimText">{item.claim}</p>
             <blockquote>{item.evidence}</blockquote>
-            <div className="claimActions">{item.start != null ? <button type="button" onClick={() => handleTimestampClick(item.start)} aria-label={`定位播放 ${formatTimestamp(item.start)}`}>▶ {formatTimestamp(item.start)}–{formatTimestamp(item.end)} 定位播放</button> : <span>旧任务无时间戳</span>}{item.context && <details><summary>展开上下文</summary><p>{item.context}</p></details>}</div>
+            <div className="claimActions">{claimTimestamp(item) != null ? <button type="button" onClick={() => handleTimestampClick(claimTimestamp(item))} aria-label={`定位播放 ${formatTimestamp(claimTimestamp(item))}`}>▶ {formatTimestamp(claimTimestamp(item))}–{formatTimestamp(item.end)} 定位播放</button> : <span>旧任务无时间戳</span>}{item.context && <details><summary>展开上下文</summary><p>{item.context}</p></details>}</div>
           </li>)}</ol></article>
           {!!result.outline?.length && <article className="summarySection"><div className="summarySectionHead"><span className="sectionNo">03</span><h3>内容脉络</h3></div><div className="outlineGrid">{result.outline.map((item, index) => <div key={index}><small>{item.title}</small><p>{item.content}</p></div>)}</div></article>}
         </div> : <article className="transcriptPaper"><div className="paperMeta"><span>带时间戳逐字稿</span><span>{result.transcript.length.toLocaleString()} 字 · {result.segments?.length || 0} 段</span></div>{result.segments?.length ? <div className="segmentList">{result.segments.map((segment, index) => <div className="segmentRow" key={index}>{segment.start != null ? <button type="button" onClick={() => handleTimestampClick(segment.start)} aria-label={`定位播放 ${formatTimestamp(segment.start)}`}>{formatTimestamp(segment.start)}</button> : <span>--:--</span>}<p>{segment.text}</p></div>)}</div> : <div className="transcriptText">{result.transcript}</div>}</article>}
@@ -438,6 +490,10 @@ export default function Home() {
       <div className="settingGroup"><div><h2>音频语言</h2><p>自动检测适合中英文视频；明确指定语言可减少误判。</p></div><div className="choiceList">
         {([['auto','自动检测','推荐 · 自动识别中文、英文及混合内容'],['zh','中文','固定按中文识别'],['en','English','固定按英文识别']] as const).map(([value,title,desc]) => <label key={value} className={settings.language === value ? "selected" : ""}><input type="radio" name="language" checked={settings.language === value} onChange={() => saveSettings({...settings, language:value})}/><span><strong>{title}</strong><small>{desc}</small></span></label>)}
       </div></div>
+      <div className="settingGroup"><div><h2>悬浮播放器</h2><p>控制新打开任务第一次向下阅读时，是否默认展开视频悬浮窗。</p></div><label className="settingToggle">
+        <input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} />
+        <span><strong>默认弹出悬浮窗</strong><small>{settings.autoExpandPlayer ? "已开启：新任务首次下滑默认展开；切换开关会同步更新当前任务。" : "已关闭：新任务和当前任务下一次下滑默认显示按钮；主动展开后仍会记住新状态。"}</small></span>
+      </label></div>
       <div className="settingGroup"><div><h2>总结服务</h2><p>云端总结会将逐字稿发送至你配置的服务。</p></div><div className="choiceList">
         {([['auto','自动选择',cloudAvailable ? '优先使用 API，失败时退回原文摘录' : '未配置 API，当前只会生成原文摘录'],['local','始终本地','不发送文字；仅提取关键原句，不理解语义'],['cloud','仅 API 语义总结',cloudAvailable ? '使用下方已配置的总结服务' : '请先在下方填写并保存 API 配置']] as const).map(([value,title,desc]) => <label key={value} className={settings.summaryMode === value ? "selected" : ""}><input type="radio" name="summary" checked={settings.summaryMode === value} onChange={() => saveSettings({...settings, summaryMode:value})}/><span><strong>{title}</strong><small>{desc}</small></span></label>)}
       </div></div>
@@ -453,6 +509,44 @@ export default function Home() {
       </div></div>
       <div className="privacyNote"><span>本地优先</span><p>视频音频、Whisper 转录和历史任务默认留在这台电脑上。只有主动使用云端总结时，逐字稿才会发送到配置的服务。</p></div>
     </section>}
+
+    {preflightOpen && <div className="dialogBackdrop" role="presentation" onMouseDown={event => {
+      if (event.target === event.currentTarget) setPreflightOpen(false);
+    }}>
+      <section className="transcriptionDialog" role="dialog" aria-modal="true" aria-labelledby="transcription-dialog-title">
+        <div className="dialogHead">
+          <div><span className="kicker">{firstUseConfirmed ? "TRANSCRIPTION MODEL" : "FIRST USE"}</span><h2 id="transcription-dialog-title">{firstUseConfirmed ? "这次使用哪个转录模型？" : "开始前，先完成首次使用确认"}</h2></div>
+          <button type="button" onClick={() => setPreflightOpen(false)} aria-label="关闭">×</button>
+        </div>
+
+        {!firstUseConfirmed && <div className="usageLimits">
+          <h3>关键使用限制</h3>
+          <label><input type="checkbox" checked={usageChecks.rights} onChange={event => setUsageChecks({...usageChecks, rights: event.target.checked})} /><span><strong>内容权限</strong>我确认有权处理该视频，并会遵守平台规则、版权和适用法律。</span></label>
+          <label><input type="checkbox" checked={usageChecks.accuracy} onChange={event => setUsageChecks({...usageChecks, accuracy: event.target.checked})} /><span><strong>结果核对</strong>我理解自动转录和总结可能出错，重要信息会回看原视频核对。</span></label>
+          <label><input type="checkbox" checked={usageChecks.resources} onChange={event => setUsageChecks({...usageChecks, resources: event.target.checked})} /><span><strong>本机资源与隐私</strong>首次使用会下载模型并占用网络、磁盘和 CPU；启用云端总结后，逐字稿会发送给所选 API 服务。</span></label>
+        </div>}
+
+        <div className="modelPicker">
+          <h3>选择本次转录模型</h3>
+          <div className="modelPickerList">{TRANSCRIPTION_MODELS.map(model => <label key={model.value} className={selectedModel === model.value ? "selected" : ""}>
+            <input type="radio" name="preflight-model" checked={selectedModel === model.value} onChange={() => setSelectedModel(model.value)} />
+            <span><strong>{model.title}<small>{model.badge}</small></strong><em>{model.description}</em></span>
+          </label>)}</div>
+        </div>
+
+        {!firstUseConfirmed && <div className="apiDecision">
+          <div><h3>总结 API（可选）</h3><p>{cloudAvailable ? "已检测到可用配置，将优先生成语义总结。" : "不配置也能完成本地转录，并生成原文提要；以后可随时在设置中添加。"}</p></div>
+          {cloudAvailable
+            ? <span className="configuredMark">✓ 已配置</span>
+            : <div><button type="button" onClick={openApiSettingsFromPreflight} disabled={!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources}>现在设置</button><button type="button" className={apiDecision === "later" ? "selected" : ""} onClick={() => setApiDecision("later")}>以后再说</button></div>}
+        </div>}
+
+        <div className="dialogActions">
+          <button type="button" onClick={() => setPreflightOpen(false)}>取消</button>
+          <button type="button" className="primary" onClick={confirmTranscription} disabled={!firstUseConfirmed && (!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources || !apiDecision)}>使用 {TRANSCRIPTION_MODELS.find(model => model.value === selectedModel)?.title} 开始转录</button>
+        </div>
+      </section>
+    </div>}
 
     <footer><span>留文 · WENL SCRIBE</span><span>本地优先，结果清晰，内容属于用户。</span><span>A WENL PROJECT</span></footer>
   </main>;
