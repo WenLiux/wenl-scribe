@@ -1,6 +1,6 @@
 # Public Assets
 
-`wenl_logo.svg` 和 `favicon.svg` 是留文品牌资产，不包含在仓库的软件源代码许可证中。未经事先书面授权，不得将它们用于分支项目、衍生产品或第三方服务。
+`wenl_logo2.svg`、`wenl_logo.svg`、`favicon.svg` 和 `wenl.ico` 是留文品牌资产，不包含在仓库的软件源代码许可证中。未经事先书面授权，不得将它们用于分支项目、衍生产品或第三方服务。
 
 品牌使用规则见 `docs/legal/trademarks.md`。
 

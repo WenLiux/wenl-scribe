@@ -9,7 +9,7 @@
 - “留文”；
 - “WENL”与“WENL Scribe”；
 - 留文 Logo、应用图标、品牌图形和专门设计的品牌视觉；
-- `public/wenl_logo.svg`、`public/favicon.svg` 及后续明确标注为留文品牌资产的文件。
+- `public/wenl_logo2.svg`、`public/wenl_logo.svg`、`public/favicon.svg`、`public/wenl.ico` 及后续明确标注为留文品牌资产的文件。
 
 上述品牌资产由权利人保留所有权利。项目当前使用 GitHub 仓库所有者名称 `WenLiux` 作为公开权利标识；正式商业授权合同应由实际拥有相应权利的个人或公司主体签署。
 

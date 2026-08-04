@@ -1,7 +1,7 @@
 # 留文 · WENL SCRIBE
 
 <p align="center">
-  <img src="public/wenl_logo.svg" width="168" alt="留文 WENL SCRIBE">
+  <img src="public/wenl_logo2.svg" width="168" alt="留文 WENL SCRIBE">
 </p>
 
 <p align="center"><strong>所见所听，皆可留文。</strong></p>

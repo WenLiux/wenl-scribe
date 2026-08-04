@@ -1,14 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg id="_图层_1" data-name="图层 1" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 236 159">
-  <defs>
-    <style>
-      .st0 {
-        fill: none;
-        stroke: #231815;
-        stroke-miterlimit: 10;
-        stroke-width: 10px;
-      }
-    </style>
-  </defs>
-  <path class="st0" d="M17.01,14.15l58.7,31.08V14.15l58.7,31.08V14.15l86.32,44.89v91.5h-28.49l-30.21-16.4v17.26h-86.32l-58.7-31.94V14.15Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="留文">
+  <rect width="64" height="64" rx="14" fill="#20231f"/>
+  <path d="M17.01,14.15l58.7,31.08V14.15l58.7,31.08V14.15l86.32,44.89v91.5h-28.49l-30.21-16.4v17.26h-86.32l-58.7-31.94V14.15Z" transform="translate(4 13) scale(.256)" fill="none" stroke="#f4f3ee" stroke-miterlimit="10" stroke-width="16"/>
 </svg>

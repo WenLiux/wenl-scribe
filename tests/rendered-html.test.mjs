@@ -19,7 +19,7 @@ test("renders the WENL application shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /WENL SCRIBE/);
-  assert.match(html, /wenl_logo\.svg/);
+  assert.match(html, /wenl_logo2\.svg/);
   assert.doesNotMatch(html, /Your site is taking shape|Codex is working/);
 });
 
@@ -96,6 +96,7 @@ test("floating player keeps one iframe while its draggable shell changes positio
   assert.match(floatingPlayer, /panelStyleFromAnchor/);
   assert.match(floatingPlayer, /width: launcherSize\.width/);
   assert.match(floatingPlayer, /showForTimestamp/);
+  assert.match(floatingPlayer, /<Icon name="play"/);
   assert.match(floatingPlayer, /className="floatingVideoBar"/);
   assert.match(floatingHook, /IntersectionObserver/);
   assert.match(floatingHook, /bounds\.bottom/);
@@ -110,6 +111,8 @@ test("floating player keeps one iframe while its draggable shell changes positio
   assert.match(page, /floatingPlayerRef\.current\?\.showForTimestamp/);
   assert.match(page, /locateVideo\(seconds\)/);
   assert.match(page, /side=\{active === "transcript" \? "right" : "left"\}/);
+  assert.match(page, /<Icon name="arrow-left"/);
+  assert.match(page, /<Icon name="arrow-right"/);
   assert.match(floatingPlayer, /将悬浮视频缩略成按钮/);
   assert.match(floatingPlayer, /<strong>视频<\/strong>/);
   assert.match(floatingPlayer, /default-\$\{side\}/);

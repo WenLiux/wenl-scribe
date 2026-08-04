@@ -11,6 +11,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { Icon } from "../Icon";
 import { BilibiliPlayer } from "./BilibiliPlayer";
 import { formatPlayerTimestamp } from "./bilibili";
 import { useFloatingPlayer } from "./useFloatingPlayer";
@@ -238,7 +239,7 @@ export const FloatingBilibiliPlayer = forwardRef<
       aria-label={`展开悬浮视频，当前定位 ${formatPlayerTimestamp(startTime)}；可拖动`}
       title="拖动调整位置，点击展开视频"
     >
-      <span aria-hidden="true">▶</span><strong>视频</strong>
+      <Icon name="play" size={13} /><strong>视频</strong>
     </button>}
 
     <span className="srOnly" aria-live="polite">
