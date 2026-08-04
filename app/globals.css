@@ -12,8 +12,9 @@ button { color:inherit; cursor:pointer; }
 .brand>span:last-child { display:flex; flex-direction:column; }
 .brand strong { font:700 17px/1.15 Georgia,"Noto Serif SC",serif; letter-spacing:.08em; }
 .brand small { font-size:8px; letter-spacing:.18em; color:var(--muted); margin-top:3px; }
-.brandGlyph { width:42px; height:32px; display:flex; align-items:center; justify-content:flex-start; overflow:hidden; }
-.brandGlyph img { display:block; width:42px; height:29px; object-fit:contain; object-position:left center; }
+.brandGlyph { width:42px; height:32px; display:flex; align-items:center; justify-content:flex-start; }
+.brandGlyph img { display:block; width:100%; max-height:100%; height:auto; object-fit:contain; object-position:left center; }
+.wenlIcon { display:block; flex:0 0 auto; }
 .nav nav { display:flex; height:100%; }
 .nav nav button { border:0; background:none; padding:0 22px; font-size:13px; color:var(--muted); position:relative; }
 .nav nav button.current { color:var(--ink); font-weight:700; }
@@ -33,12 +34,12 @@ h1 em { font-style:normal; color:var(--green); }
 .inputRow input:focus { border-color:var(--green); box-shadow:0 0 0 3px var(--green-soft); }
 .inputRow button { border:1px solid var(--ink); background:var(--ink); color:white; min-width:158px; padding:0 18px; font-weight:700; display:flex; align-items:center; justify-content:space-between; }
 .inputRow button:hover { background:#343a34; }.inputRow button:disabled { opacity:.45; cursor:not-allowed; }
-.inputRow button span { font-size:20px; font-weight:400; }
+.inputRow button .wenlIcon { width:18px; height:18px; }
 .inputFoot { display:flex; align-items:center; justify-content:space-between; color:var(--muted); font-size:11px; margin-top:12px; }
 .inputFoot button { border:0; background:none; padding:0; color:var(--muted); text-decoration:underline; }
 .taskPage,.workbench,.panelPage { margin:0 auto; width:min(1180px,calc(100% - 44px)); padding:52px 0 90px; min-height:calc(100vh - 126px); }
 .taskTop { min-height:40px; display:flex; justify-content:space-between; align-items:center; margin-bottom:44px; }
-.back { border:0; background:none; padding:0; color:var(--muted); font-size:13px; }
+.back { border:0; background:none; padding:0; color:var(--muted); font-size:13px; display:inline-flex; align-items:center; gap:7px; }
 .back:hover { color:var(--ink); }
 .jobTag,.successPill { border:1px solid var(--line); border-radius:99px; padding:8px 12px; color:var(--muted); font:11px ui-monospace,monospace; }
 .successPill { background:var(--green-soft); color:var(--green); border-color:#cdd8ca; font-family:inherit; }
@@ -49,7 +50,7 @@ h1 em { font-style:normal; color:var(--green); }
 .progressTrack { height:3px; background:var(--line); overflow:hidden; }.progressTrack i { display:block; height:100%; background:var(--green); transition:width .5s ease; }
 .stageList { display:grid; grid-template-columns:repeat(8,1fr); border:1px solid var(--line); border-right:0; margin-top:34px; }
 .stage { min-height:110px; padding:18px 14px; border-right:1px solid var(--line); color:#a3a69f; }
-.stage span { font:11px ui-monospace,monospace; }.stage p { font-size:12px; margin:42px 0 0; }
+.stage span { min-height:16px; display:flex; align-items:center; font:11px ui-monospace,monospace; }.stage p { font-size:12px; margin:42px 0 0; }
 .stage.done { color:var(--green); background:#eef2eb; }.stage.active { color:var(--ink); background:var(--panel); box-shadow:inset 0 -3px var(--green); }
 .taskMeta { display:flex; gap:30px; color:var(--muted); font-size:11px; margin-top:18px; }
 .resultHead { display:grid; grid-template-columns:220px 1fr; gap:34px; align-items:end; padding-bottom:32px; }
@@ -154,7 +155,7 @@ h1 em { font-style:normal; color:var(--green); }
 .claimText { margin:0 0 10px; font:20px/1.65 Georgia,"Noto Serif SC",serif; }
 .claimList blockquote { margin:0; padding:11px 14px; border-left:2px solid var(--green); background:#f1f2ec; color:#535951; font-size:13px; line-height:1.8; }
 .claimActions { display:flex; flex-wrap:wrap; align-items:flex-start; gap:14px; margin-top:11px; color:var(--muted); font-size:11px; }
-.claimActions>button { border:0; background:transparent; color:var(--green); font-weight:700; padding:0; }
+.claimActions>button { border:0; background:transparent; color:var(--green); font-weight:700; padding:0; display:inline-flex; align-items:center; gap:6px; }
 .claimActions>button:hover { text-decoration:underline; }
 .claimActions summary { cursor:pointer; }
 .claimActions details p { max-width:700px; margin:8px 0 0; line-height:1.7; }
@@ -173,7 +174,7 @@ h1 em { font-style:normal; color:var(--green); }
 .transcriptionDialog { width:min(760px,100%); max-height:calc(100vh - 48px); overflow:auto; border:1px solid rgba(255,255,255,.28); border-radius:16px; background:var(--panel); box-shadow:0 28px 90px rgba(0,0,0,.32); }
 .dialogHead { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; padding:26px 28px 20px; border-bottom:1px solid var(--line); }
 .dialogHead h2 { margin:7px 0 0; font:400 28px/1.35 Georgia,"Noto Serif SC",serif; }
-.dialogHead>button { width:34px; height:34px; flex:0 0 auto; border:1px solid var(--line); border-radius:50%; background:transparent; color:var(--muted); font-size:22px; line-height:1; }
+.dialogHead>button { width:34px; height:34px; flex:0 0 auto; display:grid; place-items:center; border:1px solid var(--line); border-radius:50%; background:transparent; color:var(--muted); font-size:22px; line-height:1; }
 .dialogHead>button:hover { color:var(--ink); background:var(--soft); }
 .usageLimits,.modelPicker { padding:22px 28px; border-bottom:1px solid var(--line); }
 .usageLimits h3,.modelPicker h3,.apiDecision h3 { margin:0 0 14px; font-size:12px; letter-spacing:.08em; }
@@ -197,7 +198,7 @@ h1 em { font-style:normal; color:var(--green); }
 .apiDecision button { border:1px solid var(--ink); background:transparent; padding:9px 12px; font-size:11px; }
 .apiDecision button.selected { border-color:var(--green); color:var(--green); background:var(--green-soft); }
 .apiDecision button:disabled { opacity:.45; cursor:not-allowed; }
-.configuredMark { flex:0 0 auto; color:var(--green); font-size:12px; font-weight:700; }
+.configuredMark { flex:0 0 auto; display:inline-flex; align-items:center; gap:5px; color:var(--green); font-size:12px; font-weight:700; }
 .dialogActions { display:flex; justify-content:flex-end; gap:10px; padding:20px 28px 24px; }
 .dialogActions button { min-height:42px; border:1px solid var(--ink); background:transparent; padding:0 16px; font-size:12px; }
 .dialogActions button.primary { color:white; background:var(--ink); }

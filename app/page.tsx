@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { BRAND_COPY } from "./brand";
+import { Icon } from "./components/Icon";
 import { FloatingBilibiliPlayer, type FloatingBilibiliPlayerHandle } from "./components/video/FloatingBilibiliPlayer";
 import { locateEvidenceTimestamp } from "./components/video/evidence";
 import { useVideoSeek } from "./components/video/useVideoSeek";
@@ -378,7 +379,7 @@ export default function Home() {
   return <main>
     <header className="nav">
       <button className="brand brandButton" onClick={() => { setView("home"); setResult(null); setTask(null); setError(""); }}>
-        <span className="brandGlyph"><img src="/wenl_logo.svg" alt="" /></span>
+        <span className="brandGlyph"><img src="/wenl_logo2.svg" alt="" /></span>
         <span><strong>留文</strong><small>WENL SCRIBE</small></span>
       </button>
       <nav aria-label="主要导航">
@@ -398,7 +399,7 @@ export default function Home() {
           <label htmlFor="video-url">B 站视频链接或完整分享文案</label>
           <div className="inputRow">
             <input id="video-url" value={url} onChange={e => setUrl(e.target.value)} placeholder="粘贴 B 站视频链接或完整分享文案" autoComplete="off" />
-            <button disabled={!url.trim()} type="submit">开始转录<span aria-hidden="true">→</span></button>
+            <button disabled={!url.trim()} type="submit">开始转录<Icon name="arrow-right" size={18} /></button>
           </div>
           <div className="inputFoot"><button type="button" onClick={() => setUrl(EXAMPLE)}>填入示例</button><span>音频与转录默认在本机处理</span></div>
         </form>
@@ -406,7 +407,7 @@ export default function Home() {
       </section>}
 
       {processing && task && <section className="taskPage">
-        <div className="taskTop"><button className="back" onClick={() => { setTask(null); setError(""); }}>← 返回首页</button><div className="taskTopActions"><span className="jobTag">任务 {task.job_id.slice(0, 8)}</span><button className="cancelButton" onClick={cancelTask}>取消任务</button></div></div>
+        <div className="taskTop"><button className="back" onClick={() => { setTask(null); setError(""); }}><Icon name="arrow-left" size={15} />返回首页</button><div className="taskTopActions"><span className="jobTag">任务 {task.job_id.slice(0, 8)}</span><button className="cancelButton" onClick={cancelTask}>取消任务</button></div></div>
         <div className="taskIntro">
           <div><span className="kicker">PROCESSING / 正在处理</span><h2>{task.title || "正在读取视频信息…"}</h2><p>{task.message}</p></div>
           <div className="progressNumber">{task.progress}<small>%</small></div>
@@ -416,20 +417,20 @@ export default function Home() {
           {STAGE_ORDER.map((stage, index) => {
             const currentIndex = STAGE_ORDER.indexOf(task.stage);
             const state = index < currentIndex ? "done" : index === currentIndex ? "active" : "pending";
-            return <div className={`stage ${state}`} key={stage}><span>{state === "done" ? "✓" : String(index + 1).padStart(2, "0")}</span><p>{STAGE_LABELS[stage]}</p></div>;
+            return <div className={`stage ${state}`} key={stage}><span>{state === "done" ? <Icon name="check" size={14} /> : String(index + 1).padStart(2, "0")}</span><p>{STAGE_LABELS[stage]}</p></div>;
           })}
         </div>
         <div className="taskMeta"><span>已耗时 {formatTime(elapsed)}</span><span>Whisper {task.model} · {task.language || "auto"} · CPU INT8</span><span>总结：{task.summary_mode === "local" ? "本地" : "API / 自动"}</span><span>{progressDetail(task)}</span><span>已完成阶段会立即保存</span></div>
       </section>}
 
       {(task?.status === "failed" || task?.status === "cancelled") && !result && <section className="taskPage">
-        <div className="taskTop"><button className="back" onClick={() => { setTask(null); setError(""); }}>← 返回首页</button></div>
+        <div className="taskTop"><button className="back" onClick={() => { setTask(null); setError(""); }}><Icon name="arrow-left" size={15} />返回首页</button></div>
         <ErrorCard message={error || task.message} info={task.error_info} onRetry={() => retryTask("auto")} />
         <div className="recoveryActions"><button onClick={() => retryTask("auto")}>从可用阶段重试</button><button onClick={() => retryTask("transcription")}>重新转录</button><a href={`${API}/api/download/diagnostics?job_id=${task.job_id}`}>下载脱敏诊断</a></div>
       </section>}
 
       {result && <section className="workbench" aria-live="polite">
-        <div className="taskTop"><button className="back" onClick={() => { setResult(null); setTask(null); setUrl(""); }}>← 新建转录</button><span className={`successPill ${task?.status === "partial" ? "partial" : ""}`}>{task?.status === "partial" ? "部分完成" : "处理完成"}</span></div>
+        <div className="taskTop"><button className="back" onClick={() => { setResult(null); setTask(null); setUrl(""); }}><Icon name="arrow-left" size={15} />新建转录</button><span className={`successPill ${task?.status === "partial" ? "partial" : ""}`}>{task?.status === "partial" ? "部分完成" : "处理完成"}</span></div>
         <div className="resultHead">
           <div className="coverFrame">{result.cover ? <img src={`${API}/api/cover?url=${encodeURIComponent(result.cover)}`} alt={`${result.title} 视频封面`} /> : <span>留文</span>}</div>
           <div className="resultTitle"><span className="kicker">RESULT / 内容结果</span><h2>{result.title}</h2><p>{result.author} · {formatTime(result.duration)} · {result.method}</p></div>
@@ -465,7 +466,7 @@ export default function Home() {
             <div className="claimHead"><span>{String(index + 1).padStart(2, "0")}</span><small>{item.kind}</small>{item.verified === false && <small className="unverified">旧数据未校验</small>}</div>
             <p className="claimText">{item.claim}</p>
             <blockquote>{item.evidence}</blockquote>
-            <div className="claimActions">{claimTimestamp(item) != null ? <button type="button" onClick={() => handleTimestampClick(claimTimestamp(item))} aria-label={`定位播放 ${formatTimestamp(claimTimestamp(item))}`}>▶ {formatTimestamp(claimTimestamp(item))}–{formatTimestamp(item.end)} 定位播放</button> : <span>旧任务无时间戳</span>}{item.context && <details><summary>展开上下文</summary><p>{item.context}</p></details>}</div>
+            <div className="claimActions">{claimTimestamp(item) != null ? <button type="button" onClick={() => handleTimestampClick(claimTimestamp(item))} aria-label={`定位播放 ${formatTimestamp(claimTimestamp(item))}`}><Icon name="play" size={13} />{formatTimestamp(claimTimestamp(item))}–{formatTimestamp(item.end)} 定位播放</button> : <span>旧任务无时间戳</span>}{item.context && <details><summary>展开上下文</summary><p>{item.context}</p></details>}</div>
           </li>)}</ol></article>
           {!!result.outline?.length && <article className="summarySection"><div className="summarySectionHead"><span className="sectionNo">03</span><h3>内容脉络</h3></div><div className="outlineGrid">{result.outline.map((item, index) => <div key={index}><small>{item.title}</small><p>{item.content}</p></div>)}</div></article>}
         </div> : <article className="transcriptPaper"><div className="paperMeta"><span>带时间戳逐字稿</span><span>{result.transcript.length.toLocaleString()} 字 · {result.segments?.length || 0} 段</span></div>{result.segments?.length ? <div className="segmentList">{result.segments.map((segment, index) => <div className="segmentRow" key={index}>{segment.start != null ? <button type="button" onClick={() => handleTimestampClick(segment.start)} aria-label={`定位播放 ${formatTimestamp(segment.start)}`}>{formatTimestamp(segment.start)}</button> : <span>--:--</span>}<p>{segment.text}</p></div>)}</div> : <div className="transcriptText">{result.transcript}</div>}</article>}
@@ -477,7 +478,7 @@ export default function Home() {
       <div className="historyTools"><input value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} placeholder="搜索标题、作者或 BV 号" /><select value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">全部状态</option><option value="completed">已完成</option><option value="processing">处理中</option><option value="partial">部分完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div>
       {visibleHistory.length ? <div className="historyList">{visibleHistory.map(item => <article key={item.job_id}>
         <button className="historyMain" onClick={() => openTask(item.job_id)}>
-          <span className={`statusDot ${item.status}`} /><span className="historyText"><strong>{item.title || "未命名任务"}</strong><small>{formatDate(item.created_at)} · {item.model} · {STATUS_LABELS[item.status] || item.status}{!TERMINAL.has(item.status) ? ` · ${item.progress}%` : ""}</small></span><span>→</span>
+          <span className={`statusDot ${item.status}`} /><span className="historyText"><strong>{item.title || "未命名任务"}</strong><small>{formatDate(item.created_at)} · {item.model} · {STATUS_LABELS[item.status] || item.status}{!TERMINAL.has(item.status) ? ` · ${item.progress}%` : ""}</small></span><Icon name="arrow-right" size={15} />
         </button><button className="deleteButton" onClick={() => deleteTask(item.job_id)} aria-label={`删除 ${item.title || "任务"}`}>删除</button>
       </article>)}</div> : <div className="emptyState"><b>还没有转录内容。</b><p>粘贴一个视频链接开始使用留文。</p><button onClick={() => setView("home")}>开始第一次转录</button></div>}
     </section>}
@@ -516,7 +517,7 @@ export default function Home() {
       <section className="transcriptionDialog" role="dialog" aria-modal="true" aria-labelledby="transcription-dialog-title">
         <div className="dialogHead">
           <div><span className="kicker">{firstUseConfirmed ? "TRANSCRIPTION MODEL" : "FIRST USE"}</span><h2 id="transcription-dialog-title">{firstUseConfirmed ? "这次使用哪个转录模型？" : "开始前，先完成首次使用确认"}</h2></div>
-          <button type="button" onClick={() => setPreflightOpen(false)} aria-label="关闭">×</button>
+          <button type="button" onClick={() => setPreflightOpen(false)} aria-label="关闭"><Icon name="close" size={18} /></button>
         </div>
 
         {!firstUseConfirmed && <div className="usageLimits">
@@ -537,7 +538,7 @@ export default function Home() {
         {!firstUseConfirmed && <div className="apiDecision">
           <div><h3>总结 API（可选）</h3><p>{cloudAvailable ? "已检测到可用配置，将优先生成语义总结。" : "不配置也能完成本地转录，并生成原文提要；以后可随时在设置中添加。"}</p></div>
           {cloudAvailable
-            ? <span className="configuredMark">✓ 已配置</span>
+            ? <span className="configuredMark"><Icon name="check" size={14} />已配置</span>
             : <div><button type="button" onClick={openApiSettingsFromPreflight} disabled={!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources}>现在设置</button><button type="button" className={apiDecision === "later" ? "selected" : ""} onClick={() => setApiDecision("later")}>以后再说</button></div>}
         </div>}
 
@@ -553,5 +554,5 @@ export default function Home() {
 }
 
 function ErrorCard({ message, info, onRetry }: { message: string; info?: ErrorInfo; onRetry: () => void }) {
-  return <div className="errorCard" role="alert"><span className="errorMark">!</span><div><strong>这次没有完成</strong><p>{message}</p>{info && <small>错误码：{info.code}{info.stage ? ` · 失败阶段：${STAGE_LABELS[info.stage] || info.stage}` : ""}{info.retryable ? " · 可以重试" : ""}</small>}</div><button onClick={onRetry}>{info?.retryable ? "重试" : "关闭"}</button></div>;
+  return <div className="errorCard" role="alert"><span className="errorMark"><Icon name="warning" size={17} /></span><div><strong>这次没有完成</strong><p>{message}</p>{info && <small>错误码：{info.code}{info.stage ? ` · 失败阶段：${STAGE_LABELS[info.stage] || info.stage}` : ""}{info.retryable ? " · 可以重试" : ""}</small>}</div><button onClick={onRetry}>{info?.retryable ? "重试" : "关闭"}</button></div>;
 }
