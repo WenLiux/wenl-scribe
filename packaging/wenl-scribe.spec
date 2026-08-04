@@ -45,6 +45,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="WENL Scribe",
+    icon=str(project_root / "public" / "wenl.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

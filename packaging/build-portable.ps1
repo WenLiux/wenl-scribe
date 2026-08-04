@@ -18,6 +18,11 @@ if (-not $SkipInstall) {
   & $python -m pip install -r requirements-desktop.txt
 }
 
+& $python (Join-Path $root "packaging\generate-icon.py")
+if ($LASTEXITCODE -ne 0) {
+  throw "Windows icon generation failed"
+}
+
 npm.cmd run desktop:build
 & $python -m PyInstaller --noconfirm --clean packaging/wenl-scribe.spec
 
