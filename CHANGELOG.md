@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 重写总结 API 设置流程：先选服务商、再输入 API Key；SenseNova 支持一键读取模型并自动选择。
+
+### 改进
+
+- 增加按能力进行模型发现：OpenAI、Gemini 官方兼容接口和标准兼容服务读取 `/models`，Ollama 读取 `/api/tags`；不提供列表接口的私有服务保留默认/手动模型入口。
+- 将协议、API 地址和模型 ID 收进“高级设置”，减少服务商、协议和模型选项互相污染。
+- API 接入增加显式协议层，区分供应商、协议和模型；旧配置会在读取时兼容迁移。
+- 新增 `backend/llm` Adapter、统一响应元数据和 HTTP 错误分类，避免仅通过 URL 后缀推断 SenseNova 请求格式。
+- “测试连接”改为轻量连通性探测，不再要求返回完整的总结观点或原文证据。
+- 任务和诊断信息记录实际总结供应商、协议和模型，便于复现和排查。
+- Windows 优先使用当前用户 DPAPI 加密保存新 API 密钥；保留旧版明文配置读取，并在主动保存时迁移。
+- 本地后端不再对所有来源开放 CORS；开发端口可通过 `WENL_ALLOWED_ORIGINS` 显式配置。
+- 同时兼容 SenseNova 官方 `/llm/chat-completions` 与旧版 OpenAI 兼容 `/chat/completions` 路径。
+- 兼容 SenseNova `data.choices` 响应封装、字符串消息和文本块消息格式。
+- 官方 SenseNova 请求使用 `max_new_tokens` 与文本内容块，并避免发送可能被拒绝的 `response_format` 扩展。
+- 总结响应解析改为按通用响应结构递归提取，不再按具体模型名称编写解析分支。
+- 将 HTTP 403 与 API Key 无效区分开；商汤错误码 7 会提示检查订阅中心的接口/模型权限。
+
 ## [0.7.2] - 2026-08-04
 
 ### 改进

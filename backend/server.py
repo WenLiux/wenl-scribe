@@ -16,8 +16,35 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+try:
+    from backend.llm.adapters import (
+        SUPPORTED_PROTOCOLS,
+        adapter_capabilities,
+        get_adapter,
+        normalize_models,
+        normalize_response,
+        protocol_for_config,
+    )
+    from backend.llm.contracts import LLMRequest
+    from backend.llm.errors import classify_http_status
+    from backend.credentials import CredentialStorageUnavailable, delete_secret, read_secret, write_secret
+except ModuleNotFoundError:  # Running backend/server.py directly from its folder.
+    from llm.adapters import (
+        SUPPORTED_PROTOCOLS,
+        adapter_capabilities,
+        get_adapter,
+        normalize_models,
+        normalize_response,
+        protocol_for_config,
+    )
+    from llm.contracts import LLMRequest
+    from llm.errors import classify_http_status
+    from credentials import CredentialStorageUnavailable, delete_secret, read_secret, write_secret
+
 API = "https://api.bilibili.com"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+MODEL_PROBE_MAX_OUTPUT_TOKENS = 256
+MODEL_PROBE_RETRY_OUTPUT_TOKENS = 1024
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
@@ -36,6 +63,12 @@ TASK_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR = DATA_ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = DATA_ROOT / "config.json"
+CREDENTIALS_PATH = DATA_ROOT / "credentials.json"
+ALLOWED_ORIGINS = {
+    origin.strip().rstrip("/")
+    for origin in (os.getenv("WENL_ALLOWED_ORIGINS") or "http://localhost:3001,http://127.0.0.1:3001").split(",")
+    if origin.strip()
+}
 
 MODEL_CACHE = {}
 MODEL_LOCK = threading.Lock()
@@ -69,8 +102,13 @@ ERROR_MESSAGES = {
     "AUDIO_DOWNLOAD_FAILED": "音频下载失败",
     "WHISPER_MODEL_LOAD_FAILED": "Whisper 模型加载失败",
     "TRANSCRIPTION_FAILED": "本地语音转录失败",
-    "API_KEY_INVALID": "总结服务的 API Key 无效",
+    "API_KEY_INVALID": "总结服务的 API Key 无效或已过期",
+    "API_PERMISSION_DENIED": "总结服务拒绝访问：当前账号没有访问该接口或模型的权限",
     "API_MODEL_NOT_FOUND": "总结模型不存在或不可用",
+    "API_INVALID_REQUEST": "总结服务拒绝了请求参数或请求格式",
+    "API_CONTEXT_TOO_LARGE": "逐字稿超过总结服务的上下文长度限制",
+    "API_CONFLICT": "总结服务暂时无法处理该请求",
+    "API_PROVIDER_ERROR": "总结服务返回了供应商错误",
     "API_RATE_LIMITED": "总结服务请求频率超过限制",
     "API_QUOTA_EXCEEDED": "总结服务额度已用完",
     "API_TIMEOUT": "总结服务请求超时",
@@ -135,7 +173,7 @@ def atomic_write_json(path, data):
 
 def redact(value):
     if isinstance(value, dict):
-        return {key: ("[REDACTED]" if any(word in key.lower() for word in ("key", "authorization", "cookie", "secret")) else redact(item)) for key, item in value.items()}
+        return {key: ("[REDACTED]" if any(word in key.lower() for word in ("key", "token", "authorization", "cookie", "secret")) else redact(item)) for key, item in value.items()}
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, str):
@@ -157,14 +195,73 @@ def check_cancel(job_id):
         raise TaskCancelled()
 
 
+def http_error_payload(exc):
+    """Read a provider error body without exposing credentials in diagnostics."""
+    cached = getattr(exc, "_wenl_error_payload", None)
+    if isinstance(cached, dict):
+        return cached
+    try:
+        raw = exc.read().decode("utf-8", errors="replace")
+        payload = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    error = payload.get("error", payload)
+    result = error if isinstance(error, dict) else {"message": str(error)}
+    try:
+        exc._wenl_error_payload = result
+    except AttributeError:
+        pass
+    return result
+
+
+def provider_error_code(details):
+    if not isinstance(details, dict):
+        return None
+    code = details.get("code")
+    if code is not None:
+        return code
+    status = details.get("status")
+    if isinstance(status, dict):
+        return status.get("code")
+    return None
+
+
+def http_error_message(exc):
+    details = http_error_payload(exc)
+    provider_code = provider_error_code(details)
+    provider_message = str(details.get("message") or "").strip()
+    host = str(getattr(exc, "url", "") or "").lower()
+    if exc.code == 403 and "sensenova" in host and str(provider_code) == "7":
+        return "HTTP 403（商汤错误码 7）：当前账号没有访问该接口或模型的权限；请在商汤控制台订阅中心开通 API/模型，并确认模型 ID。"
+    if exc.code == 401:
+        return "HTTP 401：API Key/API_TOKEN 无效或已过期，请重新生成并保存。"
+    if exc.code == 403:
+        return "HTTP 403：服务端拒绝访问，请检查 API Key、账号权限和模型是否已开通。"
+    if exc.code == 404:
+        return "HTTP 404：接口路径或模型 ID 不存在，请检查 API 地址和模型清单。"
+    if provider_message:
+        return f"HTTP {exc.code}：{provider_message}"
+    return str(exc)
+
+
 def error_info(exc, stage=None):
+    retry_after = None
     if isinstance(exc, TaskError):
         code = exc.code
         stage = exc.stage or stage
         retryable = exc.retryable
     elif isinstance(exc, urllib.error.HTTPError):
-        code = {401: "API_KEY_INVALID", 403: "API_KEY_INVALID", 404: "API_MODEL_NOT_FOUND", 429: "API_RATE_LIMITED", 500: "API_SERVICE_UNAVAILABLE", 502: "API_SERVICE_UNAVAILABLE", 503: "API_SERVICE_UNAVAILABLE"}.get(exc.code, "API_SERVICE_UNAVAILABLE")
-        retryable = exc.code not in (401, 403, 404)
+        details = http_error_payload(exc)
+        classification = classify_http_status(exc.code, provider_error_code(details))
+        code = classification.code
+        retryable = classification.retryable
+        raw_retry_after = getattr(exc, "headers", {}).get("Retry-After") if getattr(exc, "headers", None) else None
+        try:
+            retry_after = max(0.0, float(raw_retry_after)) if raw_retry_after is not None else None
+        except (TypeError, ValueError):
+            retry_after = None
     elif isinstance(exc, (TimeoutError, urllib.error.URLError)):
         code = "API_TIMEOUT" if stage in ("summarizing", "validating") else "UNKNOWN"
         retryable = True
@@ -179,9 +276,10 @@ def error_info(exc, stage=None):
         retryable = True
     return {
         "code": code,
-        "message": str(exc) or ERROR_MESSAGES.get(code, code),
+        "message": http_error_message(exc) if isinstance(exc, urllib.error.HTTPError) else (str(exc) or ERROR_MESSAGES.get(code, code)),
         "stage": stage,
         "retryable": retryable,
+        "retry_after": retry_after,
     }
 
 
@@ -375,19 +473,52 @@ def load_summary_config():
         except (OSError, json.JSONDecodeError):
             stored = {}
     provider = os.getenv("SUMMARY_PROVIDER") or stored.get("provider") or "openai"
-    base_url = os.getenv("OPENAI_BASE_URL") or stored.get("base_url") or "https://api.openai.com/v1"
-    model = os.getenv("OPENAI_MODEL") or stored.get("model") or "gpt-5-mini"
-    env_key_name = "SENSENOVA_API_KEY" if provider == "sensenova" else "OPENAI_API_KEY"
-    api_key = os.getenv(env_key_name) or stored.get("api_key") or ""
+    base_url = os.getenv("SUMMARY_BASE_URL") or os.getenv("OPENAI_BASE_URL") or stored.get("base_url") or "https://api.openai.com/v1"
+    model = os.getenv("SUMMARY_MODEL") or os.getenv("OPENAI_MODEL") or stored.get("model") or "gpt-5-mini"
+    protocol_value = os.getenv("SUMMARY_PROTOCOL") or stored.get("protocol")
+    try:
+        protocol = protocol_for_config({"provider": provider, "protocol": protocol_value, "base_url": base_url})
+    except ValueError:
+        try:
+            protocol = protocol_for_config({"provider": provider, "base_url": base_url})
+        except ValueError:
+            protocol = "openai_responses"
+    if provider == "sensenova":
+        # The official docs call this value API_TOKEN. Keep the older
+        # SENSENOVA_API_KEY name as a backwards-compatible fallback.
+        env_key_name = "SENSENOVA_API_TOKEN" if "SENSENOVA_API_TOKEN" in os.environ else "SENSENOVA_API_KEY"
+    else:
+        env_key_name = "OPENAI_API_KEY"
+    stored_protocol = stored.get("protocol")
+    if not stored_protocol and stored.get("provider"):
+        try:
+            stored_protocol = protocol_for_config(stored)
+        except ValueError:
+            stored_protocol = ""
+    same_credential_scope = stored.get("provider") == provider and stored_protocol == protocol
+    credential_ref = stored.get("credential_ref") if same_credential_scope else ""
+    if not credential_ref:
+        credential_ref = f"{provider}:{protocol}"
+    # Keep one encrypted credential per provider/protocol.  Switching the
+    # visible provider must not make an existing saved key disappear; the
+    # target scope may already have a key even when it is not the active one.
+    secure_key = read_secret(CREDENTIALS_PATH, credential_ref)
+    legacy_key = stored.get("api_key") if same_credential_scope else ""
+    api_key = os.getenv(env_key_name) or secure_key or legacy_key or ""
+    credential_storage = "environment" if os.getenv(env_key_name) else ("dpapi" if secure_key else ("legacy_plaintext" if legacy_key else "none"))
     configured = bool(base_url and model and (provider == "compatible" or api_key))
     return {
         "provider": provider,
+        "protocol": protocol,
         "base_url": base_url.rstrip("/"),
         "model": model,
         "api_key": api_key,
         "configured": configured,
         "managed_by_env": bool(os.getenv(env_key_name)),
         "managed_by_env_name": env_key_name,
+        "capabilities": adapter_capabilities(protocol),
+        "credential_ref": credential_ref,
+        "credential_storage": credential_storage,
     }
 
 
@@ -395,6 +526,7 @@ def public_summary_config():
     config = load_summary_config()
     return {
         "provider": config["provider"],
+        "protocol": config["protocol"],
         "base_url": config["base_url"],
         "model": config["model"],
         "has_api_key": bool(config["api_key"]),
@@ -402,6 +534,8 @@ def public_summary_config():
         "managed_by_env": config["managed_by_env"],
         "managed_by_env_name": config["managed_by_env_name"],
         "key_hint": f"••••{config['api_key'][-4:]}" if config["api_key"] else "",
+        "capabilities": config["capabilities"],
+        "credential_storage": config["credential_storage"],
     }
 
 
@@ -416,18 +550,52 @@ def save_summary_config(payload):
     model = str(payload.get("model", "")).strip()
     if not model:
         raise ValueError("请填写模型名称")
+    try:
+        protocol = protocol_for_config({"provider": provider, "protocol": payload.get("protocol"), "base_url": base_url})
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if protocol not in SUPPORTED_PROTOCOLS:
+        raise ValueError("不支持的总结协议")
 
-    stored_key = ""
+    stored = {}
     if CONFIG_PATH.exists():
         try:
-            stored_key = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("api_key", "")
+            stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            pass
-    key = stored_key if "api_key" not in payload else str(payload.get("api_key") or "").strip()
+            stored = {}
+    stored_protocol = stored.get("protocol")
+    if not stored_protocol and stored.get("provider"):
+        try:
+            stored_protocol = protocol_for_config(stored)
+        except ValueError:
+            stored_protocol = ""
+    same_credential_scope = stored.get("provider") == provider and stored_protocol == protocol
+    credential_ref = stored.get("credential_ref") if same_credential_scope else ""
+    if not credential_ref:
+        credential_ref = f"{provider}:{protocol}"
+    secure_key = read_secret(CREDENTIALS_PATH, credential_ref)
+    legacy_key = stored.get("api_key", "") if same_credential_scope else ""
+    migrated_key = ""
+    if stored.get("provider") == provider and stored_protocol and stored_protocol != protocol:
+        old_ref = stored.get("credential_ref") or f"{provider}:{stored_protocol}"
+        migrated_key = read_secret(CREDENTIALS_PATH, old_ref) or str(stored.get("api_key") or "")
+    key = (secure_key or legacy_key or migrated_key) if "api_key" not in payload else str(payload.get("api_key") or "").strip()
     if payload.get("clear_api_key"):
+        try:
+            delete_secret(CREDENTIALS_PATH, credential_ref)
+        except (CredentialStorageUnavailable, OSError):
+            pass
         key = ""
-    stored = {"provider": provider, "base_url": base_url, "model": model, "api_key": key}
-    atomic_write_json(CONFIG_PATH, stored)
+    saved = {"provider": provider, "protocol": protocol, "base_url": base_url, "model": model}
+    if key and not payload.get("clear_api_key"):
+        try:
+            write_secret(CREDENTIALS_PATH, credential_ref, key)
+            saved["credential_ref"] = credential_ref
+        except (CredentialStorageUnavailable, OSError):
+            # Keep the old format as a last-resort compatibility path.  The UI
+            # can still save on systems where DPAPI is unavailable.
+            saved["api_key"] = key
+    atomic_write_json(CONFIG_PATH, saved)
     return public_summary_config()
 
 
@@ -480,48 +648,36 @@ SUMMARY_SCHEMA = {
 
 
 def response_text(result):
-    text = result.get("output_text")
-    if text:
-        return text
-    for block in result.get("output", []):
-        for content in block.get("content", []):
-            if content.get("type") == "output_text" and content.get("text"):
-                return content["text"]
-    choices = result.get("choices") or []
-    if choices:
-        return ((choices[0].get("message") or {}).get("content") or "")
-    return ""
+    """Backward-compatible wrapper around the protocol response normalizer."""
+    return normalize_response(result).text
+
+
+def summary_chat_endpoint(config):
+    """Backward-compatible endpoint helper for older callers and tests."""
+    adapter = get_adapter(config)
+    request = LLMRequest(model=str(config.get("model") or ""), prompt="")
+    prepared = adapter.prepare(config, request)
+    return prepared.endpoint, prepared.protocol == "sensenova_native"
 
 
 def request_summary(config, title, transcript):
-    prompt = summary_prompt(title, transcript)
-    headers = {"Authorization": f"Bearer {config['api_key']}"} if config["api_key"] else {}
-    if config["provider"] == "openai":
-        payload = {
-            "model": config["model"],
-            "input": prompt,
-            "store": False,
-            "text": {"format": {"type": "json_schema", "name": "video_summary", "schema": SUMMARY_SCHEMA, "strict": True}},
-        }
-        result = request_json(f"{config['base_url']}/responses", payload, headers, 240)
-    else:
-        payload = {
-            "model": config["model"],
-            "messages": [
-                {"role": "system", "content": "你是忠实的视频内容编辑。只输出合法 JSON，不要使用 Markdown。"},
-                {"role": "user", "content": prompt + "\n\n请按 summary、key_points、outline 三个字段输出 JSON；key_points 的每项都必须包含 claim、evidence 与 kind。"},
-            ],
-        }
-        if config["provider"] == "gemini":
-            payload["reasoning_effort"] = "low"
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "video_summary", "strict": True, "schema": SUMMARY_SCHEMA},
-            }
-        elif config["provider"] == "sensenova":
-            payload["response_format"] = {"type": "json_object"}
-        result = request_json(f"{config['base_url']}/chat/completions", payload, headers, 240)
-    text = response_text(result)
+    prompt = summary_prompt(title, transcript) + "\n\n请按 summary、key_points、outline 三个字段输出 JSON；key_points 的每项都必须包含 claim、evidence 与 kind。"
+    adapter = get_adapter(config)
+    prepared = adapter.prepare(
+        config,
+        LLMRequest(
+            model=config["model"],
+            prompt=prompt,
+            schema=SUMMARY_SCHEMA,
+            schema_name="video_summary",
+            response_mode=str(config.get("response_mode") or "auto"),
+            max_output_tokens=4096,
+            timeout=240,
+        ),
+    )
+    result = request_json(prepared.endpoint, prepared.payload, prepared.headers, prepared.timeout)
+    normalized = adapter.parse(result)
+    text = normalized.text
     if not text:
         raise TaskError("SUMMARY_FIELD_MISSING", "总结服务没有返回文本", "summarizing")
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE)
@@ -549,7 +705,8 @@ def request_summary_with_retry(config, title, transcript, attempts=3, on_retry=N
                 raise
             if on_retry:
                 on_retry(attempt, info)
-            time.sleep(min(2 ** (attempt - 1), 4))
+            delay = info.get("retry_after") or min(2 ** (attempt - 1), 4)
+            time.sleep(min(max(float(delay), 0.0), 30.0))
     raise last_error
 
 
@@ -731,14 +888,193 @@ def ai_summary(title, segments, progress=None, job_id=None):
     return result
 
 
+def probe_summary_service(config, max_output_tokens=MODEL_PROBE_MAX_OUTPUT_TOKENS, allow_retry=True):
+    probe_prompt = '这是一次 API 连通性测试。请只返回一个 JSON 对象：{"ok":true}，不要输出 Markdown 或解释。'
+    adapter = get_adapter(config)
+    prepared = adapter.prepare(
+        config,
+        LLMRequest(
+            model=config["model"],
+            prompt=probe_prompt,
+            schema={
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+                "additionalProperties": False,
+            },
+            schema_name="connection_probe",
+            response_mode=str(config.get("response_mode") or "auto"),
+            max_output_tokens=max_output_tokens,
+            timeout=60,
+        ),
+    )
+    result = request_json(prepared.endpoint, prepared.payload, prepared.headers, prepared.timeout)
+    normalized = adapter.parse(result)
+    if not normalized.text:
+        if normalized.finish_reason == "length":
+            if allow_retry and max_output_tokens < MODEL_PROBE_RETRY_OUTPUT_TOKENS:
+                return probe_summary_service(
+                    config,
+                    max_output_tokens=MODEL_PROBE_RETRY_OUTPUT_TOKENS,
+                    allow_retry=False,
+                )
+            message = f"模型在输出最终内容前达到 {max_output_tokens} Token 上限，请提高输出上限或关闭推理模式"
+        else:
+            message = "总结服务返回为空"
+        raise TaskError("API_PROVIDER_ERROR", message, "testing", retryable=False)
+    return normalized
+
+
 def test_summary_service():
     config = load_summary_config()
     if not config["configured"]:
         raise ValueError("请先填写并保存可用的 API 配置")
-    segments = [{"start": 0.0, "end": 4.0, "text": "这是一段连接测试逐字稿。视频作者明确表示：连接测试成功后，系统才能生成语义总结。", "source": "test"}]
-    result = request_summary(config, "连接测试", format_segments_for_ai(segments))
-    validate_ai_summary(result, segments)
-    return {"ok": True, "message": f"连接成功：{config['model']}"}
+    normalized = probe_summary_service(config)
+    return {
+        "ok": True,
+        "message": f"连接成功：{config['model']}",
+        "protocol": config["protocol"],
+        "request_id": normalized.request_id,
+    }
+
+
+def probe_failure_message(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        return http_error_message(exc)
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def list_summary_models(selection_mode="auto"):
+    """Read the models visible to the configured account and select one.
+
+    This mirrors the standalone SenseNova tester: authenticate the model-list
+    request with the saved key, then use the provider's returned IDs instead
+    of asking the user to guess a model name.
+    """
+
+    selection_mode = str(selection_mode or "auto").strip().lower()
+    if selection_mode not in ("auto", "manual"):
+        raise ValueError("不支持的模型选择模式")
+
+    config = load_summary_config()
+    if not config["configured"]:
+        raise ValueError("璇峰厛濉啓骞朵繚瀛樺彲鐢ㄧ殑 API Key")
+    adapter = get_adapter(config)
+    if not adapter.capabilities(config).get("models"):
+        raise ValueError("褰撳墠鎺ュ彛鍗忚涓嶆敮鎸佽姹傛ā鍨嬫竻鍗�")
+
+    original_config = config
+    attempts = [config]
+    if config["provider"] == "sensenova":
+        # Existing installations may still point at the native endpoint while
+        # the tester and current compatibility docs use an OpenAI-compatible
+        # gateway. Try both supported gateways with the same saved key.
+        for base_url in (
+            "https://api.sensenova.cn/compatible-mode/v2",
+            "https://token.sensenova.cn/v1",
+        ):
+            candidate = {**config, "protocol": "sensenova_compatible", "base_url": base_url}
+            if not any(item["protocol"] == candidate["protocol"] and item["base_url"] == candidate["base_url"] for item in attempts):
+                attempts.append(candidate)
+
+    models = []
+    last_http_error = None
+    for candidate in attempts:
+        candidate_adapter = get_adapter(candidate)
+        if not candidate_adapter.capabilities(candidate).get("models"):
+            continue
+        try:
+            candidate_result = request_json(
+                candidate_adapter.models_endpoint(candidate),
+                headers=candidate_adapter.models_headers(candidate),
+                timeout=60,
+            )
+        except urllib.error.HTTPError as exc:
+            last_http_error = exc
+            if candidate["provider"] != "sensenova" or exc.code not in (403, 404):
+                raise
+            continue
+        candidate_models = normalize_models(candidate_result)
+        if candidate_models:
+            config = candidate
+            models = candidate_models
+            break
+
+    if not models and last_http_error:
+        raise last_http_error
+    if not models:
+        raise TaskError("API_MODEL_LIST_EMPTY", "API 鏈繑鍥炲彲鐢ㄦā鍨嬫竻鍗�", "testing", retryable=False)
+
+    chat_models = [item for item in models if item.get("allow_chat") is not False]
+    candidates = chat_models or models
+    preferred_model = config["model"]
+    selected = next((item for item in candidates if item["id"] == preferred_model), candidates[0])
+    selected_model = selected["id"]
+    selection_failures = []
+
+    if config["provider"] == "sensenova":
+        if selection_mode == "manual":
+            try:
+                probe_summary_service({**config, "model": preferred_model})
+            except Exception as exc:
+                raise TaskError(
+                    "API_PROVIDER_ERROR",
+                    f"模型 {preferred_model} 验证失败：{probe_failure_message(exc)}",
+                    "testing",
+                    retryable=False,
+                ) from exc
+            selected_model = preferred_model
+        else:
+            # SenseNova's model list may omit chat permissions.  Automatic
+            # discovery may probe several models, but manual selection must
+            # never be silently replaced by a fallback model.
+            probe_candidates = [selected] + [item for item in candidates if item["id"] != selected["id"]]
+            usable_model = None
+            for candidate_model in probe_candidates[:8]:
+                try:
+                    probe_summary_service({**config, "model": candidate_model["id"]})
+                except Exception as exc:
+                    selection_failures.append({
+                        "model": candidate_model["id"],
+                        "reason": probe_failure_message(exc)[:240],
+                    })
+                    continue
+                usable_model = candidate_model
+                break
+            if usable_model is None:
+                raise TaskError("API_MODEL_NOT_FOUND", "模型列表中没有可用的对话模型，请在高级设置中手动填写模型 ID", "testing", retryable=False)
+            selected_model = usable_model["id"]
+
+    # Persist the provider-selected model so the next task needs no manual
+    # model entry.  The existing credential reference is preserved by the
+    # normal config-saving path.
+    config_changed = config["protocol"] != original_config["protocol"] or config["base_url"] != original_config["base_url"]
+    if config_changed or selected_model != config["model"]:
+        save_payload = {
+            "provider": config["provider"],
+            "protocol": config["protocol"],
+            "base_url": config["base_url"],
+            "model": selected_model,
+        }
+        if config_changed:
+            save_payload["api_key"] = config["api_key"]
+        save_summary_config(save_payload)
+
+    selection = {
+        "mode": selection_mode,
+        "requested_model": preferred_model,
+        "selected_model": selected_model,
+    }
+    if selection_failures:
+        selection["failures"] = selection_failures
+
+    return {
+        "ok": True,
+        "models": models,
+        "selected_model": selected_model,
+        "selection": selection,
+        "config": public_summary_config(),
+    }
 
 
 def clean_sentence(sentence):
@@ -869,7 +1205,7 @@ def set_stage(job_id, stage, detail=None, progress=None, progress_detail=None):
 
 
 def task_metadata(task):
-    keys = ("job_id", "input", "model", "summary_mode", "language", "title", "author", "duration", "cover", "source_url", "bvid", "page", "cid", "created_at", "method_base", "detected_language")
+    keys = ("job_id", "input", "model", "summary_mode", "summary_provider", "summary_protocol", "summary_model", "language", "title", "author", "duration", "cover", "source_url", "bvid", "page", "cid", "created_at", "method_base", "detected_language")
     return {key: task.get(key) for key in keys if task.get(key) is not None}
 
 
@@ -979,6 +1315,17 @@ def run_job(job_id, resume="auto"):
         summary_error = None
         config = load_summary_config()
         should_use_api = task["summary_mode"] != "local" and config["configured"]
+        summary_service = {
+            "provider": config["provider"],
+            "protocol": config["protocol"],
+            "model": config["model"],
+        } if should_use_api else {"provider": "local", "protocol": "local", "model": None}
+        task.update({
+            "summary_provider": summary_service["provider"],
+            "summary_protocol": summary_service["protocol"],
+            "summary_model": summary_service["model"],
+        })
+        save_task(task)
         if task["summary_mode"] == "cloud" and not config["configured"]:
             summary_error = {"code": "API_KEY_INVALID", "message": "尚未配置可用的总结 API", "stage": "summarizing", "retryable": True}
         elif should_use_api:
@@ -1000,7 +1347,7 @@ def run_job(job_id, resume="auto"):
         else:
             summary = local_summary(video["title"], transcript, segments)
             suffix = "本地原文提要"
-        result = {**make_base_result(task, video, segments, method), **summary, "method": f"{method} + {suffix}"}
+        result = {**make_base_result(task, video, segments, method), **summary, "method": f"{method} + {suffix}", "summary_service": summary_service}
         if summary_error:
             result["summary_error"] = summary_error
         summary_stats = summary.get("summary_stats") or {"total": 1, "completed": 1 if not summary_error else 0, "failed": 1 if summary_error else 0}
@@ -1381,8 +1728,15 @@ def retry_job(job_id, from_stage="auto"):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def origin_allowed(self):
+        origin = self.headers.get("Origin", "").strip().rstrip("/")
+        return not origin or origin in ALLOWED_ORIGINS
+
     def cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "").strip().rstrip("/")
+        if origin and origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
@@ -1439,6 +1793,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(404, {"error": "Not found"})
 
     def do_OPTIONS(self):
+        if not self.origin_allowed():
+            return self.send_json(403, {"error": "不允许的本地页面来源"})
         self.send_response(204); self.cors(); self.end_headers()
 
     def do_GET(self):
@@ -1492,11 +1848,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "Not found"})
 
     def do_POST(self):
+        if not self.origin_allowed():
+            return self.send_json(403, {"error": "不允许的本地页面来源"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             if self.path == "/api/config":
                 return self.send_json(200, save_summary_config(payload))
+            if self.path == "/api/config/models":
+                return self.send_json(200, list_summary_models(payload.get("selection_mode", "auto")))
             if self.path == "/api/config/test":
                 return self.send_json(200, test_summary_service())
             resummary_match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})/resummarize", self.path)
@@ -1538,22 +1898,21 @@ class Handler(BaseHTTPRequestHandler):
             result = {**video, **summary, "method": "兼容接口", "transcript": transcript, "segments": segments, "job_id": job_id}
             RESULTS_BY_ID[job_id] = result
             return self.send_json(200, result)
+        except TaskError as exc:
+            self.send_json(400, {"error": str(exc), "code": exc.code, "stage": exc.stage, "retryable": exc.retryable})
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
         except urllib.error.HTTPError as exc:
             if self.path.startswith("/api/config") or self.path.endswith("/resummarize"):
-                try:
-                    detail = json.loads(exc.read().decode("utf-8")).get("error", {})
-                    detail = detail.get("message") if isinstance(detail, dict) else str(detail)
-                except Exception:
-                    detail = ""
-                self.send_json(400, {"error": f"总结服务返回错误 {exc.code}" + (f"：{detail}" if detail else "")})
+                self.send_json(400, {"error": f"总结服务返回错误 {exc.code}：{http_error_message(exc)}"})
             else:
                 self.send_json(400, {"error": f"视频服务返回错误 {exc.code}，请确认视频可以公开访问"})
         except Exception as exc:
             self.send_json(500, {"error": f"处理失败：{exc}"})
 
     def do_DELETE(self):
+        if not self.origin_allowed():
+            return self.send_json(403, {"error": "不允许的本地页面来源"})
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})", urllib.parse.urlparse(self.path).path)
         if not match:
             return self.send_json(404, {"error": "Not found"})

@@ -35,6 +35,7 @@ type Settings = {
 type TranscriptionModel = Settings["model"];
 type ApiConfig = {
   provider: "openai" | "gemini" | "sensenova" | "compatible";
+  protocol: "openai_responses" | "openai_chat" | "gemini_openai" | "sensenova_native" | "sensenova_compatible" | "ollama";
   base_url: string;
   model: string;
   has_api_key: boolean;
@@ -42,6 +43,45 @@ type ApiConfig = {
   managed_by_env?: boolean;
   managed_by_env_name?: string;
   key_hint?: string;
+  credential_storage?: "environment" | "dpapi" | "legacy_plaintext" | "none";
+  capabilities?: { models?: boolean; structured_output?: string; stream?: boolean; usage?: boolean };
+};
+type ApiModel = { id: string; name?: string; type?: string | null; owned_by?: string | null; allow_chat?: boolean | null };
+type ApiModelSelection = {
+  mode: "auto" | "manual";
+  requested_model?: string;
+  selected_model?: string;
+  failures?: { model: string; reason: string }[];
+};
+
+const API_PROTOCOL_OPTIONS: Record<ApiConfig["provider"], ReadonlyArray<{ value: ApiConfig["protocol"]; label: string }>> = {
+  openai: [
+    { value: "openai_responses", label: "OpenAI Responses API" },
+    { value: "openai_chat", label: "OpenAI Chat Completions" },
+  ],
+  gemini: [{ value: "gemini_openai", label: "Gemini OpenAI 兼容接口" }],
+  sensenova: [
+    { value: "sensenova_compatible", label: "SenseNova OpenAI 兼容接口" },
+    { value: "sensenova_native", label: "SenseNova 原生接口" },
+  ],
+  compatible: [
+    { value: "openai_chat", label: "OpenAI Chat Completions 兼容" },
+    { value: "ollama", label: "Ollama 接口" },
+  ],
+};
+
+const API_PROVIDER_OPTIONS: ReadonlyArray<{ value: ApiConfig["provider"]; label: string; description: string }> = [
+  { value: "sensenova", label: "商汤 SenseNova", description: "只需 API Key，自动读取模型并验证连接" },
+  { value: "gemini", label: "Google Gemini", description: "使用 Gemini API Key 和默认兼容接口" },
+  { value: "openai", label: "OpenAI", description: "使用 OpenAI API Key 和默认模型" },
+  { value: "compatible", label: "其他 OpenAI 兼容服务", description: "用于自定义网关或本地 Ollama" },
+];
+
+const API_PROVIDER_PRESETS: Record<ApiConfig["provider"], { protocol: ApiConfig["protocol"]; base_url: string; model: string }> = {
+  sensenova: { protocol: "sensenova_compatible", base_url: "https://api.sensenova.cn/compatible-mode/v2", model: "SenseChat-5" },
+  gemini: { protocol: "gemini_openai", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-3.5-flash" },
+  openai: { protocol: "openai_responses", base_url: "https://api.openai.com/v1", model: "gpt-5-mini" },
+  compatible: { protocol: "openai_chat", base_url: "http://127.0.0.1:11434/v1", model: "qwen3:8b" },
 };
 
 const API = typeof window !== "undefined" && window.location.port === "3001"
@@ -115,9 +155,10 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [cloudAvailable, setCloudAvailable] = useState(false);
-  const [apiConfig, setApiConfig] = useState<ApiConfig>({ provider: "openai", base_url: "https://api.openai.com/v1", model: "gpt-5-mini", has_api_key: false, configured: false });
+  const [apiConfig, setApiConfig] = useState<ApiConfig>({ provider: "openai", protocol: "openai_responses", base_url: "https://api.openai.com/v1", model: "gpt-5-mini", has_api_key: false, configured: false });
   const [apiKey, setApiKey] = useState("");
-  const [providerDirty, setProviderDirty] = useState(false);
+  const [apiModels, setApiModels] = useState<ApiModel[]>([]);
+  const [apiAdvancedOpen, setApiAdvancedOpen] = useState(false);
   const [apiMessage, setApiMessage] = useState("");
   const [apiBusy, setApiBusy] = useState(false);
   const [resummarizing, setResummarizing] = useState(false);
@@ -143,7 +184,7 @@ export default function Home() {
       const response = await fetch(`${API}/api/config`);
       if (!response.ok) return;
       const config: ApiConfig = await response.json();
-      setApiConfig(config); setCloudAvailable(config.configured); setProviderDirty(false);
+      setApiConfig(config); setCloudAvailable(config.configured); setProviderDirty(false); setApiModels([]);
     } catch { /* backend may still be starting */ }
   }, []);
 
@@ -274,18 +315,70 @@ export default function Home() {
     await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500);
   }
 
+  function apiConfigPayload() {
+    return {
+      provider: apiConfig.provider,
+      protocol: apiConfig.protocol,
+      base_url: apiConfig.base_url,
+      model: apiConfig.model,
+      ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+    };
+  }
+
+  async function persistApiConfig(): Promise<ApiConfig> {
+    const response = await fetch(`${API}/api/config`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(apiConfigPayload()),
+    });
+    const data: ApiConfig & { error?: string } = await response.json();
+    if (!response.ok) throw new Error(data.error || "保存配置失败");
+    setApiConfig(data); setCloudAvailable(data.configured); setApiKey("");
+    return data;
+  }
+
   async function saveApiConfig() {
     setApiBusy(true); setApiMessage("");
     try {
-      const response = await fetch(`${API}/api/config`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: apiConfig.provider, base_url: apiConfig.base_url, model: apiConfig.model, ...(apiKey ? { api_key: apiKey } : providerDirty ? { clear_api_key: true } : {}) }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "保存失败");
-      setApiConfig(data); setCloudAvailable(data.configured); setApiKey(""); setProviderDirty(false); setApiMessage("配置已保存在本机");
+      await persistApiConfig();
+      setApiMessage("配置已保存；如需自动选择模型，请点击读取可用模型");
     } catch (err) { setApiMessage(err instanceof Error ? err.message : "保存失败"); }
     finally { setApiBusy(false); }
+  }
+
+  async function discoverApiModels(selectionMode: "auto" | "manual" = "auto") {
+    setApiBusy(true); setApiMessage("正在保存配置并读取可用模型…");
+    try {
+      const saved = await persistApiConfig();
+      if (!saved.capabilities?.models) {
+        setApiMessage("该服务没有标准模型列表接口，请在高级设置中填写模型 ID");
+        return;
+      }
+      const response = await fetch(`${API}/api/config/models`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ selection_mode: selectionMode }) });
+      const data: { models?: ApiModel[]; selected_model?: string; selection?: ApiModelSelection; config?: ApiConfig; error?: string } = await response.json();
+      if (!response.ok) throw new Error(data.error || "读取模型失败；请在高级设置中填写模型 ID");
+      const models = Array.isArray(data.models) ? data.models : [];
+      const config = data.config;
+      setApiModels(models);
+      if (config) { setApiConfig(config); setCloudAvailable(config.configured); }
+      const selected = data.selection?.selected_model || data.selected_model || config?.model || saved.model;
+      const requested = data.selection?.requested_model || saved.model;
+      if (selectionMode === "manual" && requested !== selected) {
+        throw new Error(`当前选择的模型未被保留：${requested} → ${selected}`);
+      }
+      if (selectionMode === "auto" && requested !== selected) {
+        const failed = data.selection?.failures?.find(item => item.model === requested);
+        setApiMessage(`已自动选择 ${selected}；${requested} 验证失败${failed?.reason ? `：${failed.reason}` : ""}。已读取 ${models.length} 个可用模型`);
+      } else if (apiConfig.provider === "sensenova") {
+        setApiMessage(`连接成功：${selected}；已读取 ${models.length} 个可用模型`);
+      } else {
+        setApiMessage(`已读取 ${models.length} 个可用模型，自动选择 ${selected}`);
+      }
+    } catch (err) { setApiMessage(err instanceof Error ? err.message : "读取模型失败"); }
+    finally { setApiBusy(false); }
+  }
+
+  async function connectSenseNova() {
+    await discoverApiModels(apiModels.length > 0 ? "manual" : "auto");
   }
 
   async function testApiConfig() {
@@ -305,11 +398,11 @@ export default function Home() {
     try {
       const response = await fetch(`${API}/api/config`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: apiConfig.provider, base_url: apiConfig.base_url, model: apiConfig.model, clear_api_key: true }),
+        body: JSON.stringify({ provider: apiConfig.provider, protocol: apiConfig.protocol, base_url: apiConfig.base_url, model: apiConfig.model, clear_api_key: true }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "清除失败");
-      setApiConfig(data); setCloudAvailable(data.configured); setApiKey(""); setProviderDirty(false); setApiMessage("密钥已从本机配置中清除");
+      setApiConfig(data); setCloudAvailable(data.configured); setApiKey(""); setApiModels([]); setApiMessage("密钥已从本机配置中清除");
     } catch (err) { setApiMessage(err instanceof Error ? err.message : "清除失败"); }
     finally { setApiBusy(false); }
   }
@@ -346,16 +439,16 @@ export default function Home() {
   }
 
   function selectApiProvider(provider: ApiConfig["provider"]) {
-    const presets: Record<ApiConfig["provider"], {base_url: string; model: string}> = {
-      gemini: { base_url: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-3.5-flash" },
-      sensenova: { base_url: "https://token.sensenova.cn/v1", model: "sensenova-6.7-flash-lite" },
-      openai: { base_url: "https://api.openai.com/v1", model: "gpt-5-mini" },
-      compatible: { base_url: "http://127.0.0.1:11434/v1", model: "qwen3:8b" },
-    };
-    const preset = presets[provider];
+    const preset = API_PROVIDER_PRESETS[provider];
     setApiConfig({ ...apiConfig, provider, ...preset, configured: false, has_api_key: false, key_hint: "" });
-    setApiKey(""); setProviderDirty(true);
-    setApiMessage(provider === "gemini" ? "已填入 Gemini 推荐配置，请粘贴 Gemini API Key。" : provider === "sensenova" ? "已填入商汤日日新免费模型配置，请粘贴 SenseNova API Key。" : "请确认配置后保存并测试连接。");
+    setApiKey(""); setApiModels([]); setApiAdvancedOpen(false);
+    setApiMessage(provider === "sensenova" ? "只需输入 API Key，点击“连接并自动选择模型”。" : `${API_PROVIDER_OPTIONS.find(item => item.value === provider)?.label || "服务"} 已切换，请输入 Key 并保存配置。`);
+  }
+
+  function selectApiProtocol(protocol: ApiConfig["protocol"]) {
+    setApiConfig({ ...apiConfig, protocol, configured: false });
+    setApiModels([]);
+    setApiMessage("高级接口协议已切换；如果服务商没有标准模型列表，请在下方填写模型 ID。");
   }
 
   const processing = task && !result && !TERMINAL.has(task.status);
@@ -499,14 +592,16 @@ export default function Home() {
         {([['auto','自动选择',cloudAvailable ? '优先使用 API，失败时退回原文摘录' : '未配置 API，当前只会生成原文摘录'],['local','始终本地','不发送文字；仅提取关键原句，不理解语义'],['cloud','仅 API 语义总结',cloudAvailable ? '使用下方已配置的总结服务' : '请先在下方填写并保存 API 配置']] as const).map(([value,title,desc]) => <label key={value} className={settings.summaryMode === value ? "selected" : ""}><input type="radio" name="summary" checked={settings.summaryMode === value} onChange={() => saveSettings({...settings, summaryMode:value})}/><span><strong>{title}</strong><small>{desc}</small></span></label>)}
       </div></div>
       <div className="settingGroup apiSetting"><div><h2>总结 API</h2><p>配置后，新任务会生成语义总结；历史任务也可直接重新总结，无需再次转录。</p></div><div className="apiForm">
-        <label><span>接口类型</span><select value={apiConfig.provider} onChange={e => selectApiProvider(e.target.value as ApiConfig["provider"])}><option value="sensenova">商汤日日新 SenseNova（免费模型）</option><option value="gemini">Gemini API（免费额度推荐）</option><option value="openai">OpenAI Responses API</option><option value="compatible">OpenAI 兼容接口 / 本地 Ollama</option></select></label>
-        <label><span>API 地址</span><input value={apiConfig.base_url} onChange={e => setApiConfig({...apiConfig, base_url: e.target.value})} placeholder={apiConfig.provider === "sensenova" ? "https://token.sensenova.cn/v1" : apiConfig.provider === "gemini" ? "https://generativelanguage.googleapis.com/v1beta/openai" : apiConfig.provider === "openai" ? "https://api.openai.com/v1" : "http://127.0.0.1:11434/v1"} /></label>
-        <label><span>模型名称</span><input value={apiConfig.model} onChange={e => setApiConfig({...apiConfig, model: e.target.value})} placeholder={apiConfig.provider === "sensenova" ? "sensenova-6.7-flash-lite" : apiConfig.provider === "gemini" ? "gemini-3.5-flash" : apiConfig.provider === "openai" ? "gpt-5-mini" : "例如 qwen3:8b"} /></label>
-        <label><span>{apiConfig.provider === "sensenova" ? "SenseNova API Key" : apiConfig.provider === "gemini" ? "Gemini API Key" : "API Key"}</span><input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={apiConfig.has_api_key ? `已保存 ${apiConfig.key_hint || "密钥"}；留空则不修改` : apiConfig.provider === "compatible" ? "本地服务可留空" : apiConfig.provider === "sensenova" ? "粘贴 sk- 开头的 SenseNova Key" : apiConfig.provider === "gemini" ? "粘贴 AI Studio 生成的 Key" : "粘贴 sk-…"} autoComplete="new-password" /></label>
-        <div className="apiActions"><button className="primary" disabled={apiBusy} onClick={saveApiConfig}>{apiBusy ? "处理中…" : "保存配置"}</button><button disabled={apiBusy || !apiConfig.configured} onClick={testApiConfig}>测试连接</button>{apiConfig.has_api_key && <button disabled={apiBusy} onClick={clearApiKey}>清除密钥</button>}</div>
+        <label><span>服务商</span><select value={apiConfig.provider} onChange={e => selectApiProvider(e.target.value as ApiConfig["provider"])}>{API_PROVIDER_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small className="apiProviderNote">{API_PROVIDER_OPTIONS.find(option => option.value === apiConfig.provider)?.description}</small></label>
+        <label><span>{apiConfig.provider === "sensenova" ? "API Key / API_TOKEN" : apiConfig.provider === "gemini" ? "Gemini API Key" : "API Key"}</span><input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={apiConfig.has_api_key ? `已保存 ${apiConfig.key_hint || "密钥"}；留空则不修改` : apiConfig.provider === "compatible" ? "本地服务可留空" : apiConfig.provider === "sensenova" ? "只需粘贴 API Key，不要填 Secret Key" : apiConfig.provider === "gemini" ? "粘贴 AI Studio 生成的 Key" : "粘贴 sk-…"} autoComplete="new-password" /></label>
+        {apiConfig.provider !== "sensenova" && <label><span>模型 ID</span><input value={apiConfig.model} onChange={e => setApiConfig({...apiConfig, model: e.target.value, configured: false})} placeholder="例如 gpt-5-mini 或 qwen3:8b" /></label>}
+        {apiModels.length > 0 && <label><span>已发现的可用模型</span><select value={apiConfig.model} onChange={e => setApiConfig({...apiConfig, model: e.target.value, configured: false})}>{apiModels.map(model => <option key={model.id} value={model.id}>{model.id}{model.allow_chat === false ? "（不可对话）" : ""}</option>)}</select></label>}
+        <div className="apiConnectionCard"><span>连接状态</span><strong>{apiConfig.configured ? `已配置 · ${apiConfig.model}` : "未连接 · 输入 Key 后自动验证"}</strong><small>{apiModels.length ? `已发现 ${apiModels.length} 个模型` : "模型列表会在连接时自动读取"}</small></div>
+        <div className="apiActions"><button className="primary" disabled={apiBusy || (apiConfig.provider === "sensenova" && !apiKey.trim() && !apiConfig.has_api_key)} onClick={apiConfig.provider === "sensenova" ? connectSenseNova : saveApiConfig}>{apiBusy ? "处理中…" : apiConfig.provider === "sensenova" ? apiModels.length > 0 ? "连接并验证当前模型" : "连接并自动选择模型" : "保存配置"}</button>{apiConfig.provider === "sensenova" && apiModels.length > 0 && <button type="button" disabled={apiBusy} onClick={() => discoverApiModels("auto")}>自动选择可用模型</button>}{apiConfig.configured && <button disabled={apiBusy} onClick={testApiConfig}>测试连接</button>}{apiConfig.provider !== "sensenova" && <button type="button" disabled={apiBusy || (!apiConfig.configured && !apiKey.trim())} onClick={discoverApiModels}>读取可用模型</button>}{apiConfig.has_api_key && <button disabled={apiBusy} onClick={clearApiKey}>清除密钥</button>}<button type="button" className="apiAdvancedToggle" disabled={apiBusy} onClick={() => setApiAdvancedOpen(value => !value)}>{apiAdvancedOpen ? "收起高级设置" : "高级设置"}</button></div>
+        {apiAdvancedOpen && <div className="apiAdvanced"><div className="apiAdvancedHeading"><strong>高级连接设置</strong><small>只有自定义网关、协议异常或模型列表不可用时才需要修改。</small></div><label><span>接口协议</span><select value={apiConfig.protocol} onChange={e => selectApiProtocol(e.target.value as ApiConfig["protocol"])}>{API_PROTOCOL_OPTIONS[apiConfig.provider].map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label><span>API 地址</span><input value={apiConfig.base_url} onChange={e => setApiConfig({...apiConfig, base_url: e.target.value, configured: false})} /></label><label><span>模型 ID</span><input value={apiConfig.model} onChange={e => setApiConfig({...apiConfig, model: e.target.value, configured: false})} /></label></div>}
         {apiMessage && <p className="apiMessage" role="status">{apiMessage}</p>}
-        <small className="apiHelp">{apiConfig.provider === "gemini" && <><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">打开 Google AI Studio 获取 Key ↗</a><br /></>}{apiConfig.provider === "sensenova" && <><a href="https://platform.sensenova.cn/console/keys" target="_blank" rel="noreferrer">打开 SenseNova 控制台获取 Key ↗</a> · <a href="https://platform.sensenova.cn/docs" target="_blank" rel="noreferrer">官方文档 ↗</a><br /></>}配置保存在本机应用数据目录，不会返回给浏览器显示。Gemini、SenseNova 与兼容模式使用 /chat/completions。</small>
-        <p className="securityWarning">密钥以明文保存在本机，请勿提交或分享 data/config.json；如果密钥曾出现在截图中，请立即到服务商后台撤销并换新。</p>
+        <small className="apiHelp">{apiConfig.provider === "gemini" && <><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">打开 Google AI Studio 获取 Key ↗</a> · <a href="https://ai.google.dev/gemini-api/docs/openai" target="_blank" rel="noreferrer">Gemini OpenAI 兼容文档 ↗</a><br />官方兼容接口支持模型列表，保存 Key 后可点击“读取可用模型”；私有代理不支持时再到高级设置手动填写。</>}{apiConfig.provider === "sensenova" && <><a href="https://platform.sensenova.cn/console/keys" target="_blank" rel="noreferrer">打开 SenseNova 控制台获取 API Key ↗</a> · <a href="https://www.sensecore.cn/help/docs/model-as-service/nova/overview/compatible-mode" target="_blank" rel="noreferrer">兼容接口文档 ↗</a><br />首次连接会自动读取并验证模型；发现模型后，选择模型只验证当前选择，不会静默切换。</>}{apiConfig.provider === "compatible" && <>如果服务支持标准 <code>/models</code>，留文会自动读取；本地 Ollama 使用 <code>/api/tags</code>；不支持时只需在高级设置中填写模型 ID。</>}{apiConfig.provider === "openai" && <>OpenAI 支持标准模型列表，保存 Key 后可点击“读取可用模型”自动选择。</>}</small>
+        <p className="securityWarning">密钥优先使用 Windows 当前用户加密保存；请勿提交或分享 data/config.json、data/credentials.json 或诊断文件。旧版明文配置会在下一次主动保存时迁移。</p>
       </div></div>
       <div className="privacyNote"><span>本地优先</span><p>视频音频、Whisper 转录和历史任务默认留在这台电脑上。只有主动使用云端总结时，逐字稿才会发送到配置的服务。</p></div>
     </section>}
