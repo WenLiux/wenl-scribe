@@ -102,13 +102,25 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-portable.ps1
 
 留文可以使用 Gemini、SenseNova、OpenAI Responses API、本地 Ollama，以及其他 OpenAI 兼容接口。
 
-在页面右上角打开“设置”，选择接口类型，填写 API 地址、模型和密钥，然后依次点击“保存配置”和“测试连接”。不开启云端总结时，留文仍可提供本地原文重点摘录。
+在页面右上角打开“设置”，先选择服务商，再输入 API Key。SenseNova 可直接点击“连接并自动选择模型”；OpenAI、Gemini 和标准兼容服务可先保存配置，再点击“读取可用模型”。协议、地址和模型 ID 已收进“高级设置”，不开启云端总结时，留文仍可提供本地原文重点摘录。
+
+### 商汤 SenseNova 接入 DeepSeek V4 Flash
+
+这里的 DeepSeek V4 Flash 是通过商汤 SenseNova 平台接入，不是直接调用 DeepSeek 官方接口。设置页选择“商汤 SenseNova”，粘贴控制台生成的 API Key / `API_TOKEN`，点击“连接并自动选择模型”即可。留文会先读取账号可见模型，再用极短连接探测跳过不可用模型并自动选择可对话模型；不需要手填模型 ID。
+
+留文会自动尝试 SenseNova 官方兼容接口和测试台使用的旧版兼容网关；如果旧配置仍指向原生接口，模型读取成功后也会自动迁移到可用接口。不要把完整的 API_TOKEN、Secret Key 或配置文件提交到 GitHub。
+
+### 通用接口方法
+
+留文按“接口协议”适配，不按模型名称适配。OpenAI、Gemini 官方 OpenAI 兼容接口和标准兼容服务会尝试读取 `/models`，本地 Ollama 会读取 `/api/tags`；如果第三方网关不提供模型列表，连接流程会提示你在“高级设置”中填写模型 ID。只有路径或消息格式不符合通用协议的服务，才需要增加一个协议预设，而不是为每个模型增加一套适配。
+
+参考：[SenseNova 官方 API 文档](https://platform.sensenova.cn/product/APIService/document)。
 
 启用云端总结时：
 
 - 音频仍在本机转录；
 - 带时间戳逐字稿会发送给你选择的总结服务；
-- API 密钥以明文保存在本机应用数据目录，不会提交到仓库。
+- Windows 版本优先使用当前用户 DPAPI 加密保存 API 密钥；旧版明文配置会在用户下一次主动保存时迁移。无论哪种格式，都不要提交或分享应用数据目录。
 
 请阅读完整的 [隐私说明](PRIVACY.md)。
 

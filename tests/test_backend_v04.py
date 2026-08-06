@@ -1,8 +1,10 @@
+import io
 import importlib.util
 import json
 import pathlib
 import tempfile
 import unittest
+import urllib.error
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -79,6 +81,139 @@ class BackendV04Tests(unittest.TestCase):
         self.assertEqual(clean["api_key"], "[REDACTED]")
         self.assertEqual(clean["authorization"], "[REDACTED]")
         self.assertEqual(clean["message"], "ok")
+
+    def test_explicit_protocol_does_not_infer_sensenova_payload_from_url(self):
+        config = {
+            "provider": "compatible",
+            "protocol": "openai_chat",
+            "base_url": "https://example.test/v1/llm",
+            "model": "example-model",
+            "api_key": "test-key",
+            "capabilities": {"structured_output": "prompt_json"},
+        }
+        prepared = server.get_adapter(config).prepare(
+            config,
+            server.LLMRequest(model="example-model", prompt="测试", schema={"type": "object"}),
+        )
+        self.assertEqual(prepared.endpoint, "https://example.test/v1/llm/chat/completions")
+        self.assertIsInstance(prepared.payload["messages"][0]["content"], str)
+        self.assertNotIn("max_new_tokens", prepared.payload)
+        self.assertNotIn("response_format", prepared.payload)
+
+    def test_model_discovery_supports_openai_and_ollama_endpoints(self):
+        openai_config = {"provider": "openai", "protocol": "openai_chat", "base_url": "https://example.test/v1"}
+        gemini_config = {"provider": "gemini", "protocol": "gemini_openai", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}
+        ollama_config = {"provider": "compatible", "protocol": "ollama", "base_url": "http://127.0.0.1:11434/v1"}
+        self.assertTrue(server.adapter_capabilities("openai_chat")["models"])
+        self.assertTrue(server.adapter_capabilities("gemini_openai")["models"])
+        self.assertTrue(server.adapter_capabilities("ollama")["models"])
+        self.assertEqual(server.get_adapter(openai_config).models_endpoint(openai_config), "https://example.test/v1/models")
+        self.assertEqual(server.get_adapter(gemini_config).models_endpoint(gemini_config), "https://generativelanguage.googleapis.com/v1beta/openai/models")
+        self.assertEqual(server.get_adapter(ollama_config).models_endpoint(ollama_config), "http://127.0.0.1:11434/api/tags")
+
+    def test_switching_provider_reuses_existing_target_credential(self):
+        original_config_path = server.CONFIG_PATH
+        original_credentials_path = server.CREDENTIALS_PATH
+        original_read_secret = server.read_secret
+        original_write_secret = server.write_secret
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                server.CONFIG_PATH = root / "config.json"
+                server.CREDENTIALS_PATH = root / "credentials.json"
+                secrets = {"sensenova:sensenova_compatible": "sense-key"}
+                server.read_secret = lambda _path, reference: secrets.get(reference, "")
+                server.write_secret = lambda _path, reference, value: secrets.__setitem__(reference, value)
+                server.CONFIG_PATH.write_text(
+                    json.dumps({"provider": "compatible", "protocol": "openai_chat", "base_url": "http://127.0.0.1:11434/v1", "model": "qwen3:8b"}),
+                    encoding="utf-8",
+                )
+                result = server.save_summary_config({
+                    "provider": "sensenova",
+                    "protocol": "sensenova_compatible",
+                    "base_url": "https://api.sensenova.cn/compatible-mode/v2",
+                    "model": "SenseChat-5",
+                })
+                self.assertTrue(result["has_api_key"])
+                self.assertEqual(result["key_hint"], "••••-key")
+                saved = json.loads(server.CONFIG_PATH.read_text(encoding="utf-8"))
+                self.assertEqual(saved["credential_ref"], "sensenova:sensenova_compatible")
+        finally:
+            server.CONFIG_PATH = original_config_path
+            server.CREDENTIALS_PATH = original_credentials_path
+            server.read_secret = original_read_secret
+            server.write_secret = original_write_secret
+
+    def test_protocol_must_match_provider_when_explicit(self):
+        with self.assertRaises(ValueError):
+            server.protocol_for_config({"provider": "gemini", "protocol": "sensenova_native"})
+
+    def test_legacy_sensenova_url_migrates_to_compatible_protocol(self):
+        self.assertEqual(
+            server.protocol_for_config({"provider": "sensenova", "base_url": "https://token.sensenova.cn/v1"}),
+            "sensenova_compatible",
+        )
+
+    def test_connection_probe_does_not_require_summary_claims(self):
+        original_load = server.load_summary_config
+        original_request = server.request_json
+        captured = {}
+        try:
+            server.load_summary_config = lambda: {
+                "provider": "compatible",
+                "protocol": "openai_chat",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "qwen3:8b",
+                "api_key": "",
+                "configured": True,
+                "capabilities": {"structured_output": "prompt_json"},
+            }
+
+            def fake_request(url, payload=None, headers=None, timeout=30):
+                captured.update({"url": url, "payload": payload, "timeout": timeout})
+                return {"choices": [{"message": {"content": "服务已响应，但没有输出总结观点。"}}]}
+
+            server.request_json = fake_request
+            result = server.test_summary_service()
+            self.assertTrue(result["ok"])
+            self.assertEqual(captured["timeout"], 60)
+            self.assertEqual(captured["url"], "http://127.0.0.1:11434/v1/chat/completions")
+        finally:
+            server.load_summary_config = original_load
+            server.request_json = original_request
+
+    def test_http_400_is_invalid_request_and_not_retryable(self):
+        body = io.BytesIO(b'{"error":{"message":"unsupported parameter"}}')
+        error = urllib.error.HTTPError("https://example.test/v1/chat/completions", 400, "Bad Request", {}, body)
+        info = server.error_info(error, "summarizing")
+        self.assertEqual(info["code"], "API_INVALID_REQUEST")
+        self.assertFalse(info["retryable"])
+        error.close()
+
+    def test_normalized_response_keeps_usage_and_request_metadata(self):
+        result = server.normalize_response({
+            "id": "req-123",
+            "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+            "usage": {"total_tokens": 12},
+        })
+        self.assertEqual(result.text, "{}")
+        self.assertEqual(result.request_id, "req-123")
+        self.assertEqual(result.finish_reason, "stop")
+        self.assertEqual(result.usage["total_tokens"], 12)
+
+    def test_sensenova_403_is_reported_as_permission_error(self):
+        body = io.BytesIO(b'{"error":{"code":7,"message":"Forbidden"}}')
+        error = urllib.error.HTTPError(
+            "https://api.sensenova.cn/v1/llm/chat-completions",
+            403,
+            "Forbidden",
+            {},
+            body,
+        )
+        info = server.error_info(error, "summarizing")
+        self.assertEqual(info["code"], "API_PERMISSION_DENIED")
+        self.assertIn("商汤错误码 7", info["message"])
+        error.close()
 
     def test_markdown_exports_use_readable_layout_and_title_filename(self):
         result = {
@@ -163,10 +298,200 @@ class BackendV04Tests(unittest.TestCase):
             )
             self.assertEqual(result["summary"], "测试总结")
             self.assertEqual(captured["url"], "https://token.sensenova.cn/v1/chat/completions")
-            self.assertEqual(captured["payload"]["response_format"], {"type": "json_object"})
+            self.assertNotIn("response_format", captured["payload"])
+            self.assertEqual(captured["payload"]["max_tokens"], 4096)
+            self.assertFalse(captured["payload"]["stream"])
             self.assertEqual(captured["headers"]["Authorization"], "Bearer sk-test")
         finally:
             server.request_json = original_request_json
+
+    def test_sensenova_model_list_normalizes_permissions_and_selects_chat_model(self):
+        original_load = server.load_summary_config
+        original_request_json = server.request_json
+        original_save = server.save_summary_config
+        original_public = server.public_summary_config
+        saved = []
+        try:
+            config = {
+                "provider": "sensenova",
+                "protocol": "sensenova_compatible",
+                "base_url": "https://api.sensenova.cn/compatible-mode/v2",
+                "model": "unavailable-model",
+                "api_key": "sk-test",
+                "configured": True,
+            }
+            server.load_summary_config = lambda: config
+
+            def fake_request(url, *args, **_kwargs):
+                if url.endswith("/chat/completions"):
+                    return {"choices": [{"message": {"content": "ok"}}]}
+                return {
+                    "data": [
+                        {"id": "image-model", "permission": [{"allow_chat": False}]},
+                        {"id": "chat-model", "permission": [{"allow_chat": True}]},
+                    ]
+                }
+
+            server.request_json = fake_request
+            server.save_summary_config = lambda payload: saved.append(payload)
+            server.public_summary_config = lambda: {"model": "chat-model", "configured": True}
+            result = server.list_summary_models()
+            self.assertEqual(result["selected_model"], "chat-model")
+            self.assertEqual(result["models"][0]["allow_chat"], False)
+            self.assertEqual(result["models"][1]["allow_chat"], True)
+            self.assertEqual(saved[0]["model"], "chat-model")
+        finally:
+            server.load_summary_config = original_load
+            server.request_json = original_request_json
+            server.save_summary_config = original_save
+            server.public_summary_config = original_public
+
+    def test_sensenova_manual_model_validation_does_not_fallback(self):
+        original_load = server.load_summary_config
+        original_request_json = server.request_json
+        original_probe = server.probe_summary_service
+        original_save = server.save_summary_config
+        saved = []
+        try:
+            config = {
+                "provider": "sensenova",
+                "protocol": "sensenova_compatible",
+                "base_url": "https://token.sensenova.cn/v1",
+                "model": "glm-5.2",
+                "api_key": "sk-test",
+                "configured": True,
+            }
+            server.load_summary_config = lambda: config
+            server.request_json = lambda url, *args, **_kwargs: {
+                "data": [{"id": "deepseek-v4-flash"}, {"id": "glm-5.2"}]
+            }
+
+            def failing_probe(candidate):
+                raise server.TaskError("API_PROVIDER_ERROR", "模型返回为空", "testing", retryable=False)
+
+            server.probe_summary_service = failing_probe
+            server.save_summary_config = lambda payload: saved.append(payload)
+            with self.assertRaises(server.TaskError) as raised:
+                server.list_summary_models("manual")
+            self.assertIn("glm-5.2", str(raised.exception))
+            self.assertEqual(saved, [])
+        finally:
+            server.load_summary_config = original_load
+            server.request_json = original_request_json
+            server.probe_summary_service = original_probe
+            server.save_summary_config = original_save
+
+    def test_sensenova_probe_uses_reasoning_safe_output_budget(self):
+        original_request_json = server.request_json
+        captured = {}
+        try:
+            def fake_request(url, payload=None, headers=None, timeout=30):
+                captured.update({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+                return {"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]}
+
+            server.request_json = fake_request
+            server.probe_summary_service({
+                "provider": "sensenova",
+                "protocol": "sensenova_compatible",
+                "base_url": "https://token.sensenova.cn/v1",
+                "model": "glm-5.2",
+                "api_key": "sk-test",
+            })
+            self.assertEqual(captured["payload"]["max_tokens"], server.MODEL_PROBE_MAX_OUTPUT_TOKENS)
+            self.assertEqual(server.MODEL_PROBE_MAX_OUTPUT_TOKENS, 256)
+        finally:
+            server.request_json = original_request_json
+
+    def test_sensenova_probe_retries_when_reasoning_hits_output_limit(self):
+        original_request_json = server.request_json
+        budgets = []
+        try:
+            def fake_request(url, payload=None, headers=None, timeout=30):
+                budgets.append(payload.get("max_tokens") or payload.get("max_completion_tokens"))
+                if len(budgets) == 1:
+                    return {"choices": [{"message": {"content": "", "reasoning_content": "thinking"}, "finish_reason": "length"}]}
+                return {"choices": [{"message": {"content": "{\"ok\":true}"}, "finish_reason": "stop"}]}
+
+            server.request_json = fake_request
+            result = server.probe_summary_service({
+                "provider": "sensenova",
+                "protocol": "sensenova_compatible",
+                "base_url": "https://token.sensenova.cn/v1",
+                "model": "sensenova-6.7-flash-lite",
+                "api_key": "sk-test",
+            })
+            self.assertEqual(result.text, "{\"ok\":true}")
+            self.assertEqual(budgets, [server.MODEL_PROBE_MAX_OUTPUT_TOKENS, server.MODEL_PROBE_RETRY_OUTPUT_TOKENS])
+        finally:
+            server.request_json = original_request_json
+
+    def test_sensenova_model_list_falls_back_from_native_to_compatible_gateway(self):
+        original_load = server.load_summary_config
+        original_request_json = server.request_json
+        original_save = server.save_summary_config
+        original_public = server.public_summary_config
+        saved = []
+        try:
+            config = {
+                "provider": "sensenova",
+                "protocol": "sensenova_native",
+                "base_url": "https://api.sensenova.cn/v1/llm",
+                "model": "legacy-model",
+                "api_key": "sk-test",
+                "configured": True,
+            }
+            server.load_summary_config = lambda: config
+
+            def fake_request(url, *args, **_kwargs):
+                if url.endswith("/v1/llm/models"):
+                    raise urllib.error.HTTPError(url, 403, "Forbidden", {}, io.BytesIO(b'{"error":{"code":7}}'))
+                if url.endswith("/chat/completions"):
+                    return {"choices": [{"message": {"content": "ok"}}]}
+                return {"data": [{"id": "compatible-chat", "allow_chat": True}]}
+
+            server.request_json = fake_request
+            server.save_summary_config = lambda payload: saved.append(payload)
+            server.public_summary_config = lambda: {"protocol": "sensenova_compatible", "model": "compatible-chat", "configured": True}
+            result = server.list_summary_models()
+            self.assertEqual(result["selected_model"], "compatible-chat")
+            self.assertEqual(saved[0]["protocol"], "sensenova_compatible")
+            self.assertEqual(saved[0]["base_url"], "https://api.sensenova.cn/compatible-mode/v2")
+            self.assertEqual(saved[0]["api_key"], "sk-test")
+        finally:
+            server.load_summary_config = original_load
+            server.request_json = original_request_json
+            server.save_summary_config = original_save
+            server.public_summary_config = original_public
+
+    def test_sensenova_official_endpoint_uses_documented_path_and_response_envelope(self):
+        original_request_json = server.request_json
+        captured = {}
+        try:
+            def fake_request(url, payload=None, headers=None, timeout=30):
+                captured.update({"url": url, "payload": payload, "headers": headers})
+                content = json.dumps({"summary": "官方接口测试", "key_points": [], "outline": []}, ensure_ascii=False)
+                return {"data": {"choices": [{"message": {"content": [{"type": "text", "text": content}]}}]}}
+
+            server.request_json = fake_request
+            result = server.request_summary(
+                {"provider": "sensenova", "base_url": "https://api.sensenova.cn/v1/llm", "model": "deepseek-v4-flash", "api_key": "token-test"},
+                "测试标题",
+                "[00:00-00:04] 官方接口逐字稿",
+            )
+            self.assertEqual(result["summary"], "官方接口测试")
+            self.assertEqual(captured["url"], "https://api.sensenova.cn/v1/llm/chat-completions")
+            self.assertEqual(captured["payload"]["model"], "deepseek-v4-flash")
+            self.assertEqual(captured["payload"]["max_new_tokens"], 4096)
+            self.assertNotIn("response_format", captured["payload"])
+            self.assertEqual(captured["headers"]["Authorization"], "Bearer token-test")
+        finally:
+            server.request_json = original_request_json
+
+    def test_response_text_accepts_sensenova_data_choices(self):
+        content = json.dumps({"summary": "嵌套响应", "key_points": [], "outline": []}, ensure_ascii=False)
+        result = {"data": {"choices": [{"message": {"content": [{"type": "text", "text": content}]}}]}}
+        self.assertEqual(server.response_text(result), content)
+        self.assertEqual(server.response_text({"data": {"choices": [{"message": content}]}}), content)
 
 
 if __name__ == "__main__":

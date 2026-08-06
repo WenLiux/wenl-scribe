@@ -39,8 +39,18 @@ test("keeps v0.4 evidence, recovery, and export controls in the UI", async () =>
   assert.match(page, /<FloatingBilibiliPlayer/);
   assert.match(page, /handleTimestampClick\(claimTimestamp\(item\)\)/);
   assert.match(page, /handleTimestampClick\(segment\.start\)/);
-  assert.match(page, /商汤日日新 SenseNova/);
-  assert.match(page, /sensenova-6\.7-flash-lite/);
+  assert.match(page, /API_PROVIDER_OPTIONS/);
+  assert.match(page, /服务商/);
+  assert.match(page, /sensenova_compatible/);
+  assert.match(page, /连接并自动选择模型/);
+  assert.match(page, /连接并验证当前模型/);
+  assert.match(page, /自动选择可用模型/);
+  assert.match(page, /selection_mode/);
+  assert.match(page, /discoverApiModels/);
+  assert.match(page, /Gemini OpenAI 兼容文档/);
+  assert.match(page, /SenseChat-5/);
+  assert.match(page, /compatible-mode\/v2/);
+  assert.match(page, /高级设置/);
   assert.match(css, /\.claimList/);
   assert.match(css, /\.segmentRow/);
   assert.match(css, /\.partialNotice/);
@@ -51,7 +61,10 @@ test("keeps v0.4 evidence, recovery, and export controls in the UI", async () =>
 });
 
 test("backend persists staged artifacts and exposes recovery endpoints", async () => {
-  const backend = await readFile(new URL("../backend/server.py", import.meta.url), "utf8");
+  const [backend, adapters] = await Promise.all([
+    readFile(new URL("../backend/server.py", import.meta.url), "utf8"),
+    readFile(new URL("../backend/llm/adapters.py", import.meta.url), "utf8"),
+  ]);
   for (const artifact of ["metadata.json", "status.json", "transcript.json", "summary.json", "transcript.md", "summary.md", "task.log"]) {
     assert.match(backend, new RegExp(artifact.replace(".", "\\.")));
   }
@@ -61,7 +74,23 @@ test("backend persists staged artifacts and exposes recovery endpoints", async (
   assert.match(backend, /def retry_job/);
   assert.match(backend, /\/api\/download\/diagnostics/);
   assert.match(backend, /provider.*sensenova/);
-  assert.match(backend, /response_format.*json_object/);
+  assert.match(backend, /API_PERMISSION_DENIED/);
+  assert.match(backend, /商汤错误码 7/);
+  assert.match(backend, /MODEL_PROBE_MAX_OUTPUT_TOKENS/);
+  assert.match(backend, /selection_mode/);
+  assert.match(backend, /probe_failure_message/);
+  assert.match(adapters, /"response_format"/);
+  assert.match(adapters, /chat-completions/);
+  assert.match(adapters, /max_new_tokens/);
+  assert.match(adapters, /choices/);
+  assert.match(adapters, /message/);
+  assert.match(adapters, /delta/);
+  assert.match(adapters, /output_text/);
+  assert.match(adapters, /sensenova_native/);
+  assert.match(adapters, /"gemini_openai": \{"structured_output": "json_schema", "models": True/);
+  assert.match(adapters, /normalize_models/);
+  assert.match(adapters, /api\/tags/);
+  assert.match(backend, /\/api\/config\/models/);
   assert.match(backend, /"platform": "bilibili"/);
   assert.match(backend, /def resolve_page/);
 });
