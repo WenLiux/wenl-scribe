@@ -71,6 +71,11 @@ test("keeps v0.4 evidence, recovery, and export controls in the UI", async () =>
   assert.match(css, /\.articleClaimGrid/);
   assert.match(css, /\.articleReadingGrid/);
   assert.match(css, /\.articleToc/);
+  assert.match(css, /\.articleImageBlock/);
+  assert.match(page, /article_blocks/);
+  assert.match(page, /\/api\/jobs\/\$\{result\.job_id\}\/images\/\$\{imageIndex\}/);
+  assert.match(page, /下载图文包 ZIP/);
+  assert.match(page, /\/api\/download\/article-package/);
 });
 
 test("backend persists staged artifacts and exposes recovery endpoints", async () => {
@@ -86,6 +91,8 @@ test("backend persists staged artifacts and exposes recovery endpoints", async (
   assert.match(backend, /def cancel_job/);
   assert.match(backend, /def retry_job/);
   assert.match(backend, /\/api\/download\/diagnostics/);
+  assert.match(backend, /def build_article_package/);
+  assert.match(backend, /\/api\/download\/article-package/);
   assert.match(backend, /provider.*sensenova/);
   assert.match(backend, /API_PERMISSION_DENIED/);
   assert.match(backend, /商汤错误码 7/);
@@ -109,6 +116,8 @@ test("backend persists staged artifacts and exposes recovery endpoints", async (
   assert.match(backend, /def resolve_bilibili_link/);
   assert.match(backend, /def parse_bilibili_article/);
   assert.match(backend, /"content_type": "article"/);
+  assert.match(backend, /def load_article_image/);
+  assert.match(backend, /\/api\/jobs\/\(\[a-f0-9\]\{32\}\)\/images/);
 });
 
 test("v0.5 player keeps fixed Bilibili origins and CSP", async () => {
@@ -174,4 +183,16 @@ test("new transcription asks for a model and first-use limits", async () => {
   assert.match(page, /autoExpandPlayer: true/);
   assert.match(page, /默认弹出悬浮窗/);
   assert.match(page, /autoExpand=\{settings\.autoExpandPlayer\}/);
+});
+
+test("development API calls stay same-origin and use the Vite proxy", async () => {
+  const [page, viteConfig] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /const API = "";/);
+  assert.doesNotMatch(page, /http:\/\/127\.0\.0\.1:8765/);
+  assert.match(viteConfig, /"\/api"\s*:\s*\{/);
+  assert.match(viteConfig, /target:\s*"http:\/\/127\.0\.0\.1:8765"/);
 });

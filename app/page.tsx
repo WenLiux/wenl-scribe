@@ -10,6 +10,7 @@ import type { BilibiliVideoInfo } from "./components/video/types";
 
 type ArticleBlockKind = "heading" | "paragraph" | "list_item" | "quote" | "code" | "caption" | "table_cell";
 type TranscriptSegment = { start: number | null; end: number | null; text: string; source?: string; kind?: ArticleBlockKind };
+type ArticleBlock = { kind: ArticleBlockKind | "image"; text?: string; image_url?: string; alt?: string; image_index?: number };
 type Claim = { claim: string; evidence: string; kind: string; start: number | null; end: number | null; context?: string; verified?: boolean };
 type ErrorInfo = { code: string; message: string; stage?: string; retryable?: boolean };
 type Result = {
@@ -17,6 +18,7 @@ type Result = {
   content_type?: "video" | "article"; article_id?: string;
   source_url: string; bvid?: string; page?: number; video?: BilibiliVideoInfo;
   article?: { platform: "bilibili"; articleId?: string; sourceUrl?: string; title?: string; author?: string };
+  article_blocks?: ArticleBlock[];
   method: string; summary: string; key_points: string[]; transcript: string;
   outline?: { title: string; content: string }[]; evidence?: string[]; summary_type?: "extractive" | "generative";
   segments?: TranscriptSegment[]; claims?: Claim[]; summary_error?: ErrorInfo;
@@ -88,9 +90,9 @@ const API_PROVIDER_PRESETS: Record<ApiConfig["provider"], { protocol: ApiConfig[
   compatible: { protocol: "openai_chat", base_url: "http://127.0.0.1:11434/v1", model: "qwen3:8b" },
 };
 
-const API = typeof window !== "undefined" && window.location.port === "3001"
-  ? "http://127.0.0.1:8765"
-  : "";
+// Keep browser requests on the page origin. In development Vite proxies /api
+// to the Python service, while the packaged app serves both from one origin.
+const API = "";
 const EXAMPLE = "【分享示例】 https://b23.tv/UXgYm0R";
 const VIDEO_STAGE_ORDER = ["parsing", "checking_subtitles", "downloading", "loading_model", "transcribing", "cleaning", "summarizing", "validating", "completed"];
 const ARTICLE_STAGE_ORDER = ["parsing", "cleaning", "summarizing", "validating", "completed"];
@@ -505,6 +507,7 @@ export default function Home() {
     return matchesStatus && haystack.includes(historyQuery.trim().toLowerCase());
   });
   const resultIsArticle = result?.content_type === "article" || Boolean(result?.article_id);
+  const resultImageCount = result?.article_blocks?.filter(block => block.kind === "image").length || 0;
   const taskIsArticle = task?.content_type === "article" || Boolean(task?.article_id);
   const stageOrder = taskIsArticle ? ARTICLE_STAGE_ORDER : VIDEO_STAGE_ORDER;
   const resultClaims: Claim[] = result?.claims?.length ? result.claims : (result?.key_points || []).map((point, index) => ({ claim: point, evidence: result?.evidence?.[index] || point, kind: result?.summary_type === "extractive" ? "原文摘录" : "作者观点", start: null, end: null }));
@@ -581,6 +584,7 @@ export default function Home() {
             <div><small>正文规模</small><strong>{result.transcript.length.toLocaleString()} 字</strong></div>
             <div><small>内容结构</small><strong>{result.segments?.length || 0} 个段落</strong></div>
             <div><small>整理方式</small><strong>{result.summary_type === "generative" ? "AI 语义导读" : "本地原文摘录"}</strong></div>
+            <div><small>图片留存</small><strong>{resultImageCount} 张</strong></div>
             <a href={result.source_url} target="_blank" rel="noreferrer">打开 B 站原文 <Icon name="arrow-right" size={15} /></a>
           </div>
         </header> : <div className="resultHead">
@@ -603,7 +607,7 @@ export default function Home() {
         </div> : null}
         <div className={`toolbar ${resultIsArticle ? "articleToolbar" : ""}`}>
           <div className="tabs" role="tablist"><button className={active === "summary" ? "active" : ""} onClick={() => setActive("summary")}>{resultIsArticle ? "摘要导读" : "内容总结"}</button><button className={active === "transcript" ? "active" : ""} onClick={() => setActive("transcript")}>{resultIsArticle ? "阅读原文" : "完整转录"}</button></div>
-          <div className="actions">{!resultIsArticle && <label className="autoFloatToggle" title="控制新打开任务首次下滑时是否默认展开悬浮播放器"><input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} /><span>默认弹出视频</span></label>}<button className="copy" onClick={copyCurrent}>{copied ? "已复制" : "复制"}</button><a className="download" href={downloadUrl}>下载 Markdown</a><a className="copy" href={`${API}/api/download/diagnostics?job_id=${result.job_id}`}>诊断</a></div>
+          <div className="actions">{!resultIsArticle && <label className="autoFloatToggle" title="控制新打开任务首次下滑时是否默认展开悬浮播放器"><input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} /><span>默认弹出视频</span></label>}<button className="copy" onClick={copyCurrent}>{copied ? "已复制" : "复制"}</button><a className="download" href={downloadUrl}>下载 Markdown</a>{resultIsArticle && resultImageCount > 0 && <a className="download" href={`${API}/api/download/article-package?job_id=${encodeURIComponent(result.job_id)}`}>下载图文包 ZIP</a>}<a className="copy" href={`${API}/api/download/diagnostics?job_id=${result.job_id}`}>诊断</a></div>
         </div>
         {active === "summary" ? resultIsArticle ? <ArticleSummary
           result={result}
@@ -762,19 +766,40 @@ function ArticleSummary({ result, claims, task, error, cloudAvailable, resummari
 function ArticleOriginal({ result }: { result: Result }) {
   const segments = result.segments?.length ? result.segments : result.transcript.split(/\n+/).filter(Boolean).map(text => ({ start: null, end: null, text, kind: "paragraph" as const }));
   const blockKinds = articleBlockKinds(segments);
-  const headings = segments.map((segment, index) => ({ segment, index, kind: blockKinds[index] })).filter(item => item.kind === "heading");
+  const legacyBlocks: ArticleBlock[] = segments.map((segment, index) => ({ ...segment, kind: blockKinds[index] }));
+  const sourceBlocks = result.article_blocks?.length ? result.article_blocks : legacyBlocks;
+  const blocks = sourceBlocks.map((block, blockIndex) => {
+    if (block.kind !== "image") return block;
+    const imageIndex = typeof block.image_index === "number"
+      ? block.image_index
+      : sourceBlocks.slice(0, blockIndex).filter(candidate => candidate.kind === "image").length;
+    return { ...block, image_index: imageIndex };
+  });
+  const headings = blocks.map((block, index) => ({ block, index })).filter(item => item.block.kind === "heading" && item.block.text);
+  const imageCount = blocks.filter(block => block.kind === "image").length;
   return <article className="articleReadingPage">
-    <header className="articleReadingHead"><div><span>ORIGINAL TEXT</span><strong>文章原文</strong></div><p>{result.transcript.length.toLocaleString()} 字 · {segments.length} 个段落</p></header>
+    <header className="articleReadingHead"><div><span>ORIGINAL TEXT</span><strong>文章原文</strong></div><p>{result.transcript.length.toLocaleString()} 字 · {segments.length} 个段落{imageCount ? ` · ${imageCount} 张配图` : ""}</p></header>
     <div className={`articleReadingGrid ${headings.length ? "withToc" : ""}`}>
-      {headings.length > 0 && <aside className="articleToc" aria-label="文章目录"><span>CONTENTS</span><strong>本文目录</strong><ol>{headings.map(({segment, index}, headingIndex) => <li key={index}><a href={`#article-section-${index}`}><small>{String(headingIndex + 1).padStart(2, "0")}</small>{segment.text}</a></li>)}</ol></aside>}
-      <div className="articleBody">{segments.map((segment, index) => {
-        const kind = blockKinds[index];
-        if (kind === "heading") return <h2 id={`article-section-${index}`} key={index}><span>{String(headings.findIndex(item => item.index === index) + 1).padStart(2, "0")}</span>{segment.text}</h2>;
-        if (kind === "quote") return <blockquote key={index}>{segment.text}</blockquote>;
-        if (kind === "code") return <pre key={index}><code>{segment.text}</code></pre>;
-        if (kind === "caption") return <p className="articleCaption" key={index}>图注｜{segment.text.replace(/^【图片说明】/, "")}</p>;
-        if (kind === "list_item") return <div className="articleListItem" key={index}><span>•</span><p>{segment.text}</p></div>;
-        return <p key={index}>{segment.text}</p>;
+      {headings.length > 0 && <aside className="articleToc" aria-label="文章目录"><span>CONTENTS</span><strong>本文目录</strong><ol>{headings.map(({block, index}, headingIndex) => <li key={index}><a href={`#article-section-${index}`}><small>{String(headingIndex + 1).padStart(2, "0")}</small>{block.text}</a></li>)}</ol></aside>}
+      <div className="articleBody">{blocks.map((block, index) => {
+        const text = block.text || "";
+        if (block.kind === "image") {
+          const imageIndex = block.image_index || 0;
+          return <figure className="articleImageBlock" key={`image-${imageIndex}-${index}`}>
+            <div className="articleImageCanvas">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img loading="lazy" decoding="async" src={`${API}/api/jobs/${result.job_id}/images/${imageIndex}`} alt={block.alt || `文章配图 ${imageIndex + 1}`} onError={event => event.currentTarget.closest("figure")?.classList.add("isUnavailable")} />
+              <div className="articleImageFallback">配图暂时无法加载，可前往 B 站原文查看。</div>
+            </div>
+            <figcaption><span>FIGURE {String(imageIndex + 1).padStart(2, "0")}</span>{block.alt || "文章配图 · 已保存到本机"}</figcaption>
+          </figure>;
+        }
+        if (block.kind === "heading") return <h2 id={`article-section-${index}`} key={index}><span>{String(headings.findIndex(item => item.index === index) + 1).padStart(2, "0")}</span>{text}</h2>;
+        if (block.kind === "quote") return <blockquote key={index}>{text}</blockquote>;
+        if (block.kind === "code") return <pre key={index}><code>{text}</code></pre>;
+        if (block.kind === "caption") return <p className="articleCaption" key={index}>图注｜{text.replace(/^【图片说明】/, "")}</p>;
+        if (block.kind === "list_item") return <div className="articleListItem" key={index}><span>•</span><p>{text}</p></div>;
+        return <p key={index}>{text}</p>;
       })}</div>
     </div>
     <footer className="articleReadingFoot"><span>原文来自哔哩哔哩，留文仅做本地提取与排版。</span><a href={result.source_url} target="_blank" rel="noreferrer">查看最新原文 ↗</a></footer>
