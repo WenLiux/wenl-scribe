@@ -14,8 +14,9 @@ import server
 
 
 HOST = "127.0.0.1"
-PORT = 8766
+PORT = int(os.getenv("WENL_DESKTOP_PORT") or "8766")
 APP_URL = f"http://{HOST}:{PORT}"
+AUTO_OPEN_BROWSER = os.getenv("WENL_DESKTOP_NO_AUTO_OPEN") != "1"
 
 
 def service_is_running():
@@ -46,7 +47,8 @@ def run():
     httpd = server.create_server(HOST, PORT)
     worker = threading.Thread(target=httpd.serve_forever, name="wenl-http", daemon=True)
     worker.start()
-    threading.Timer(0.6, open_application).start()
+    if AUTO_OPEN_BROWSER:
+        threading.Timer(0.6, open_application).start()
 
     def quit_application(icon, _item):
         httpd.shutdown()

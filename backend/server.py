@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import Counter
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -80,12 +81,12 @@ CANCEL_EVENTS = {}
 
 STAGES = {
     "pending": (2, "任务已创建，正在准备"),
-    "parsing": (8, "正在解析视频信息"),
+    "parsing": (8, "正在解析内容信息"),
     "checking_subtitles": (15, "正在检查公开字幕"),
     "downloading": (25, "未发现字幕，正在下载音频"),
     "loading_model": (40, "正在加载本地 Whisper 模型"),
     "transcribing": (45, "正在识别语音内容"),
-    "cleaning": (80, "正在整理逐字稿"),
+    "cleaning": (80, "正在整理原文"),
     "summarizing": (84, "正在生成内容总结"),
     "validating": (97, "正在校验观点与原文依据"),
     "completed": (100, "处理完成"),
@@ -95,6 +96,8 @@ STAGES = {
 }
 
 ERROR_MESSAGES = {
+    "CONTENT_URL_INVALID": "B 站链接无效",
+    "CONTENT_INFO_FETCH_FAILED": "无法读取 B 站内容信息",
     "VIDEO_URL_INVALID": "视频链接无效",
     "VIDEO_RESTRICTED": "视频可能需要登录、付费或受到地区限制",
     "VIDEO_INFO_FETCH_FAILED": "无法读取视频信息",
@@ -102,6 +105,8 @@ ERROR_MESSAGES = {
     "AUDIO_DOWNLOAD_FAILED": "音频下载失败",
     "WHISPER_MODEL_LOAD_FAILED": "Whisper 模型加载失败",
     "TRANSCRIPTION_FAILED": "本地语音转录失败",
+    "ARTICLE_FETCH_FAILED": "无法读取 B 站文章",
+    "ARTICLE_CONTENT_EMPTY": "B 站文章没有可提取的正文",
     "API_KEY_INVALID": "总结服务的 API Key 无效或已过期",
     "API_PERMISSION_DENIED": "总结服务拒绝访问：当前账号没有访问该接口或模型的权限",
     "API_MODEL_NOT_FOUND": "总结模型不存在或不可用",
@@ -269,7 +274,7 @@ def error_info(exc, stage=None):
         code = "SUMMARY_JSON_INVALID"
         retryable = True
     elif isinstance(exc, ValueError):
-        code = "VIDEO_URL_INVALID" if stage in (None, "parsing") else "UNKNOWN"
+        code = "CONTENT_URL_INVALID" if stage in (None, "parsing") else "UNKNOWN"
         retryable = True
     else:
         code = "UNKNOWN"
@@ -331,19 +336,241 @@ def request_json(url, data=None, headers=None, timeout=60):
         return json.loads(response.read().decode("utf-8"))
 
 
-def resolve_bvid(value):
-    url_match = re.search(r"https?://[^\s<>]+", value, flags=re.IGNORECASE)
+def request_text(url, headers=None, timeout=60):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        raw = response.read()
+        charset = response.headers.get_content_charset() or "utf-8"
+        return raw.decode(charset, errors="replace"), response.geturl()
+
+
+def extract_shared_url(value):
+    url_match = re.search(r"https?://[^\s<>]+", str(value or ""), flags=re.IGNORECASE)
     if not url_match:
-        raise ValueError("没有找到有效链接。请粘贴 B 站视频链接或完整分享文案。")
-    link = url_match.group(0).rstrip("，,。；;！!？?、】）)]}'\"")
-    if "b23.tv" in link:
+        raise ValueError("没有找到有效链接。请粘贴 B 站视频、文章链接或完整分享文案。")
+    return url_match.group(0).rstrip("，,。；;！!？?、】）)]}'\"")
+
+
+def is_bilibili_host(hostname):
+    hostname = str(hostname or "").lower().rstrip(".")
+    return hostname == "bilibili.com" or hostname.endswith(".bilibili.com") or hostname == "b23.tv" or hostname.endswith(".b23.tv")
+
+
+def resolve_bilibili_link(value):
+    link = extract_shared_url(value)
+    parsed = urllib.parse.urlparse(link)
+    if not is_bilibili_host(parsed.hostname):
+        raise ValueError("暂时只支持 bilibili.com 或 b23.tv 的视频和文章链接。")
+    if parsed.hostname and (parsed.hostname.lower() == "b23.tv" or parsed.hostname.lower().endswith(".b23.tv")):
         req = urllib.request.Request(link, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=20) as response:
             link = response.geturl()
-    match = re.search(r"(BV[0-9A-Za-z]{10})", link)
-    if not match:
-        raise ValueError("暂时只支持 B 站公开视频。请确认链接来自 bilibili.com 或 b23.tv。")
-    return match.group(1), link
+        parsed = urllib.parse.urlparse(link)
+        if not is_bilibili_host(parsed.hostname):
+            raise ValueError("B 站短链跳转到了不受支持的网站。")
+
+    video_match = re.search(r"(BV[0-9A-Za-z]{10})", link)
+    if video_match:
+        return {"content_type": "video", "bvid": video_match.group(1), "resolved_url": link}
+
+    opus_match = re.search(r"/opus/(\d+)", parsed.path, flags=re.IGNORECASE)
+    if opus_match:
+        return {"content_type": "article", "article_id": opus_match.group(1), "resolved_url": link}
+
+    read_match = re.search(r"/read/cv(\d+)", parsed.path, flags=re.IGNORECASE)
+    if read_match:
+        return {"content_type": "article", "article_id": f"cv{read_match.group(1)}", "resolved_url": link}
+
+    raise ValueError("没有识别到 B 站视频 BV 号或文章编号。请确认链接可以公开访问。")
+
+
+def resolve_bvid(value):
+    resolved = resolve_bilibili_link(value)
+    if resolved["content_type"] != "video":
+        raise ValueError("这个链接是 B 站文章，不是视频。")
+    return resolved["bvid"], resolved["resolved_url"]
+
+
+class BilibiliArticleHTMLParser(HTMLParser):
+    CONTENT_CLASSES = {"opus-module-content", "article-holder", "read-article-holder"}
+    BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "li", "blockquote", "pre", "figcaption", "td", "th"}
+    VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.depth = 0
+        self.content_depth = None
+        self.block_depth = None
+        self.block_tag = None
+        self.block_parts = []
+        self.fallback_parts = []
+        self.blocks = []
+        self.title_depth = None
+        self.title_parts = []
+        self.author_depth = None
+        self.author_parts = []
+        self.page_title_parts = []
+        self.in_page_title = False
+        self.meta = {}
+        self.images = []
+
+    @staticmethod
+    def _attributes(attrs):
+        return {str(key).lower(): str(value or "") for key, value in attrs}
+
+    @staticmethod
+    def _clean(value):
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    def _inside_content(self):
+        return self.content_depth is not None and self.depth >= self.content_depth
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attributes = self._attributes(attrs)
+        classes = set(attributes.get("class", "").split())
+        element_depth = self.depth + 1
+
+        if tag == "meta":
+            name = (attributes.get("property") or attributes.get("name") or "").lower()
+            content = self._clean(attributes.get("content"))
+            if name and content:
+                self.meta[name] = content
+        if tag == "title":
+            self.in_page_title = True
+        if self.title_depth is None and "opus-module-title__text" in classes:
+            self.title_depth = element_depth
+        if self.author_depth is None and "opus-module-author__name" in classes:
+            self.author_depth = element_depth
+
+        element_id = attributes.get("id", "")
+        if self.content_depth is None and (classes & self.CONTENT_CLASSES or element_id in self.CONTENT_CLASSES):
+            self.content_depth = element_depth
+
+        if tag not in self.VOID_TAGS:
+            self.depth = element_depth
+
+        if self._inside_content():
+            if tag in self.BLOCK_TAGS and self.block_depth is None:
+                self.block_depth = self.depth
+                self.block_tag = tag
+                self.block_parts = []
+            elif tag == "br":
+                target = self.block_parts if self.block_depth is not None else self.fallback_parts
+                target.append("\n")
+            elif tag == "img":
+                source = attributes.get("data-src") or attributes.get("src") or ""
+                if source.startswith("//"):
+                    source = "https:" + source
+                alt = self._clean(attributes.get("alt"))
+                if source:
+                    self.images.append({"url": source, "alt": alt})
+                if alt and alt.lower() not in {"image", "图片", "哔哩哔哩"}:
+                    self.blocks.append({"text": alt, "kind": "caption"})
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data):
+        if self.in_page_title:
+            self.page_title_parts.append(data)
+        if self.title_depth is not None and self.depth >= self.title_depth:
+            self.title_parts.append(data)
+        if self.author_depth is not None and self.depth >= self.author_depth:
+            self.author_parts.append(data)
+        if self._inside_content():
+            target = self.block_parts if self.block_depth is not None else self.fallback_parts
+            target.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "title":
+            self.in_page_title = False
+        if self.block_depth is not None and self.depth == self.block_depth:
+            text = self._clean("".join(self.block_parts))
+            if text:
+                kind = {
+                    "h1": "heading", "h2": "heading", "h3": "heading", "h4": "heading",
+                    "li": "list_item", "blockquote": "quote", "pre": "code",
+                    "figcaption": "caption", "td": "table_cell", "th": "table_cell",
+                }.get(self.block_tag, "paragraph")
+                self.blocks.append({"text": text, "kind": kind})
+            self.block_depth = None
+            self.block_tag = None
+            self.block_parts = []
+        if self.title_depth is not None and self.depth == self.title_depth:
+            self.title_depth = None
+        if self.author_depth is not None and self.depth == self.author_depth:
+            self.author_depth = None
+        if self.content_depth is not None and self.depth == self.content_depth:
+            fallback = self._clean("".join(self.fallback_parts))
+            if fallback and not self.blocks:
+                self.blocks.append({"text": fallback, "kind": "paragraph"})
+            self.content_depth = None
+        if tag not in self.VOID_TAGS:
+            self.depth = max(0, self.depth - 1)
+
+
+def parse_bilibili_article(html, source_url, article_id):
+    parser = BilibiliArticleHTMLParser()
+    parser.feed(html)
+    parser.close()
+    title = parser._clean("".join(parser.title_parts)) or parser.meta.get("og:title") or parser._clean("".join(parser.page_title_parts))
+    title = re.sub(r"\s*[-_]\s*哔哩哔哩\s*$", "", title).strip()
+    author = parser._clean("".join(parser.author_parts)) or parser.meta.get("author") or "未知作者"
+    blocks = []
+    seen = set()
+    for block in parser.blocks:
+        item = block if isinstance(block, dict) else {"text": block, "kind": "paragraph"}
+        text = parser._clean(item.get("text"))
+        signature = re.sub(r"\s+", "", text)
+        if text and signature not in seen:
+            blocks.append({"text": text, "kind": item.get("kind") or "paragraph"})
+            seen.add(signature)
+    if not title:
+        raise TaskError("ARTICLE_FETCH_FAILED", "未能读取文章标题，请确认文章可以公开访问。", "parsing")
+    if len("".join(block["text"] for block in blocks)) < 40:
+        raise TaskError("ARTICLE_CONTENT_EMPTY", "未能从页面提取到足够的文章正文，文章可能已删除、仅登录可见或页面结构已变化。", "parsing")
+    cover = parser.meta.get("og:image") or (parser.images[0]["url"] if parser.images else "")
+    return {
+        "content_type": "article",
+        "article_id": article_id,
+        "title": title,
+        "author": author,
+        "duration": 0,
+        "cover": cover,
+        "source_url": source_url,
+        "segments": [
+            {**normalize_segment({"text": block["text"]}, "bilibili_article"), "kind": block["kind"]}
+            for block in blocks
+        ],
+    }
+
+
+def get_article(link):
+    resolved = resolve_bilibili_link(link)
+    if resolved["content_type"] != "article":
+        raise ValueError("这个链接是 B 站视频，不是文章。")
+    html, final_url = request_text(resolved["resolved_url"], headers={"Referer": "https://www.bilibili.com/"}, timeout=60)
+    final_resolved = resolve_bilibili_link(final_url)
+    if final_resolved["content_type"] != "article":
+        raise TaskError("ARTICLE_FETCH_FAILED", "文章地址跳转到了不受支持的内容。", "parsing")
+    article_id = final_resolved["article_id"]
+    canonical_url = (
+        f"https://www.bilibili.com/read/{article_id}"
+        if article_id.startswith("cv")
+        else f"https://www.bilibili.com/opus/{article_id}"
+    )
+    return parse_bilibili_article(html, canonical_url, article_id)
+
+
+def get_source(link):
+    resolved = resolve_bilibili_link(link)
+    if resolved["content_type"] == "video":
+        return get_video(link), None
+    article = get_article(link)
+    segments = article.pop("segments")
+    return article, segments
 
 
 def normalize_page(value):
@@ -372,6 +599,7 @@ def get_video(link):
     selected_page = pages[page - 1]
     source_url = f"https://www.bilibili.com/video/{bvid}?p={page}"
     return {
+        "content_type": "video",
         "bvid": bvid,
         "page": page,
         "cid": selected_page["cid"],
@@ -600,18 +828,18 @@ def save_summary_config(payload):
 
 
 def summary_prompt(title, transcript):
-    return f"""请基于下面的逐字稿生成忠实、克制的视频总结。
+    return f"""请基于下面的原文生成忠实、克制的内容总结。
 只总结说话者明确表达的内容，不使用外部知识，不补充事实，不把猜测改写成定论。
-区分“视频作者的判断”和“已确认的客观事实”；有歧义时保留限定词。
+区分“内容作者的判断”和“已确认的客观事实”；有歧义时保留限定词。
 summary 用 60 至 120 字概括主旨，且只能综合 key_points 中已被原句支持的观点；
 key_points 给出 3 至 6 项，每项包含 claim、evidence 和 kind；
-evidence 必须逐字复制逐字稿正文、禁止改写，也不要包含方括号中的时间戳；
+evidence 必须逐字复制原文、禁止改写，也不要包含方括号中的时间戳；
 kind 只能是：作者观点、嘉宾观点、事实陈述、案例、推测、引用；
-outline 按视频实际论述顺序给出 2 至 5 段。
-若转写质量不足，应减少结论数量，不要猜测。
+outline 按原文实际论述顺序给出 2 至 5 段。
+若原文质量不足，应减少结论数量，不要猜测。
 
 标题：{title}
-逐字稿：
+原文：
 {transcript}"""
 
 
@@ -669,7 +897,7 @@ def request_summary(config, title, transcript):
             model=config["model"],
             prompt=prompt,
             schema=SUMMARY_SCHEMA,
-            schema_name="video_summary",
+            schema_name="content_summary",
             response_mode=str(config.get("response_mode") or "auto"),
             max_output_tokens=4096,
             timeout=240,
@@ -1205,7 +1433,7 @@ def set_stage(job_id, stage, detail=None, progress=None, progress_detail=None):
 
 
 def task_metadata(task):
-    keys = ("job_id", "input", "model", "summary_mode", "summary_provider", "summary_protocol", "summary_model", "language", "title", "author", "duration", "cover", "source_url", "bvid", "page", "cid", "created_at", "method_base", "detected_language")
+    keys = ("job_id", "input", "content_type", "article_id", "model", "summary_mode", "summary_provider", "summary_protocol", "summary_model", "language", "title", "author", "duration", "cover", "source_url", "bvid", "page", "cid", "created_at", "method_base", "detected_language")
     return {key: task.get(key) for key in keys if task.get(key) is not None}
 
 
@@ -1230,23 +1458,40 @@ def save_task(task):
             atomic_write_text(directory / "summary.md", summary_markdown(result))
 
 
-def make_base_result(task, video, segments, method):
-    return {
-        **video,
-        "video": {
-            "platform": "bilibili",
-            "bvid": video.get("bvid"),
-            "page": normalize_page(video.get("page")),
-            "sourceUrl": video.get("source_url"),
-            "title": video.get("title"),
-            "author": video.get("author"),
-            "duration": video.get("duration"),
-        },
+def source_metadata(task):
+    keys = ("content_type", "article_id", "bvid", "page", "cid", "title", "author", "duration", "cover", "source_url")
+    return {key: task.get(key) for key in keys if task.get(key) is not None}
+
+
+def make_base_result(task, source, segments, method):
+    content_type = source.get("content_type") or ("article" if source.get("article_id") else "video")
+    result = {
+        **source,
+        "content_type": content_type,
         "method": method,
         "transcript": segments_text(segments),
         "segments": segments,
         "job_id": task["job_id"],
     }
+    if content_type == "article":
+        result["article"] = {
+            "platform": "bilibili",
+            "articleId": source.get("article_id"),
+            "sourceUrl": source.get("source_url"),
+            "title": source.get("title"),
+            "author": source.get("author"),
+        }
+    else:
+        result["video"] = {
+            "platform": "bilibili",
+            "bvid": source.get("bvid"),
+            "page": normalize_page(source.get("page")),
+            "sourceUrl": source.get("source_url"),
+            "title": source.get("title"),
+            "author": source.get("author"),
+            "duration": source.get("duration"),
+        }
+    return result
 
 
 def run_job(job_id, resume="auto"):
@@ -1259,58 +1504,68 @@ def run_job(job_id, resume="auto"):
     try:
         check_cancel(job_id)
         segments = task.get("transcript_segments") if resume == "summary" else None
-        video = None
+        source = None
         method = task.get("method_base")
         if segments:
-            video = {key: task.get(key) for key in ("bvid", "page", "cid", "title", "author", "duration", "cover", "source_url")}
-            if not video.get("title"):
-                raise TaskError("VIDEO_INFO_FETCH_FAILED", "历史任务缺少视频信息，无法重新总结", "parsing")
+            source = source_metadata(task)
+            if not source.get("title"):
+                raise TaskError("CONTENT_INFO_FETCH_FAILED", "历史任务缺少内容信息，无法重新总结", "parsing")
         else:
             set_stage(job_id, "parsing")
             try:
-                video = get_video(task["input"])
+                source, extracted_segments = get_source(task["input"])
+            except TaskError:
+                raise
             except ValueError as exc:
-                raise TaskError("VIDEO_URL_INVALID", str(exc), "parsing") from exc
+                raise TaskError("CONTENT_URL_INVALID", str(exc), "parsing") from exc
             except Exception as exc:
-                raise TaskError("VIDEO_INFO_FETCH_FAILED", str(exc), "parsing") from exc
+                raise TaskError("CONTENT_INFO_FETCH_FAILED", str(exc), "parsing") from exc
             with TASK_LOCK:
-                task.update(video)
+                task.update(source)
                 save_task(task)
             check_cancel(job_id)
-            set_stage(job_id, "checking_subtitles")
-            try:
-                segments = get_subtitles(video)
-            except Exception as exc:
-                log_task(job_id, "subtitle_fetch_failed", error=error_info(exc, "checking_subtitles"))
-                segments = []
-            method = "公开字幕"
             detected_language = task["language"]
-            if not segments:
-                segments, detected_language = transcribe(
-                    job_id,
-                    video,
-                    task["model"],
-                    task["language"],
-                    lambda stage, detail=None, progress=None, progress_detail=None: set_stage(job_id, stage, detail, progress, progress_detail),
-                )
-                method = f"本地语音转写 · {task['model']} · {detected_language}"
+            if source.get("content_type") == "article":
+                segments = extracted_segments or []
+                method = "B 站文章正文"
+                detected_language = "article"
+                set_stage(job_id, "cleaning", f"已读取 {len(segments)} 个正文段落，正在整理原文", 80, {"segments": len(segments)})
+                if not segments:
+                    raise TaskError("ARTICLE_CONTENT_EMPTY", None, "cleaning")
             else:
-                set_stage(job_id, "cleaning", f"已找到 {len(segments)} 条公开字幕，正在整理时间戳", 80, {"segments": len(segments)})
-            if not segments:
-                raise TaskError("TRANSCRIPTION_FAILED", "没有生成可用的逐字稿", "transcribing")
+                set_stage(job_id, "checking_subtitles")
+                try:
+                    segments = get_subtitles(source)
+                except Exception as exc:
+                    log_task(job_id, "subtitle_fetch_failed", error=error_info(exc, "checking_subtitles"))
+                    segments = []
+                method = "公开字幕"
+                if not segments:
+                    segments, detected_language = transcribe(
+                        job_id,
+                        source,
+                        task["model"],
+                        task["language"],
+                        lambda stage, detail=None, progress=None, progress_detail=None: set_stage(job_id, stage, detail, progress, progress_detail),
+                    )
+                    method = f"本地语音转写 · {task['model']} · {detected_language}"
+                else:
+                    set_stage(job_id, "cleaning", f"已找到 {len(segments)} 条公开字幕，正在整理时间戳", 80, {"segments": len(segments)})
+                if not segments:
+                    raise TaskError("TRANSCRIPTION_FAILED", "没有生成可用的逐字稿", "transcribing")
             with TASK_LOCK:
                 task["transcript_segments"] = segments
                 task["method_base"] = method
                 task["detected_language"] = detected_language
                 task["available_results"] = ["transcript"]
-                task["result"] = make_base_result(task, video, segments, method)
+                task["result"] = make_base_result(task, source, segments, method)
                 RESULTS_BY_ID[job_id] = task["result"]
                 save_task(task)
             log_task(job_id, "transcript_saved", segments=len(segments), characters=len(segments_text(segments)), method=method)
 
         check_cancel(job_id)
         transcript = segments_text(segments)
-        set_stage(job_id, "summarizing", "逐字稿已保存，正在生成总结", 84, {"segments": len(segments)})
+        set_stage(job_id, "summarizing", "原文已保存，正在生成总结", 84, {"segments": len(segments)})
         summary = None
         summary_error = None
         config = load_summary_config()
@@ -1331,7 +1586,7 @@ def run_job(job_id, resume="auto"):
         elif should_use_api:
             try:
                 summary = ai_summary(
-                    video["title"],
+                    source["title"],
                     segments,
                     lambda stage, detail=None, progress=None, progress_detail=None: set_stage(job_id, stage, detail, progress, progress_detail),
                     job_id,
@@ -1345,9 +1600,9 @@ def run_job(job_id, resume="auto"):
         if summary:
             suffix = "AI 语义总结"
         else:
-            summary = local_summary(video["title"], transcript, segments)
+            summary = local_summary(source["title"], transcript, segments)
             suffix = "本地原文提要"
-        result = {**make_base_result(task, video, segments, method), **summary, "method": f"{method} + {suffix}", "summary_service": summary_service}
+        result = {**make_base_result(task, source, segments, method), **summary, "method": f"{method} + {suffix}", "summary_service": summary_service}
         if summary_error:
             result["summary_error"] = summary_error
         summary_stats = summary.get("summary_stats") or {"total": 1, "completed": 1 if not summary_error else 0, "failed": 1 if summary_error else 0}
@@ -1381,9 +1636,10 @@ def run_job(job_id, resume="auto"):
             has_transcript = bool(task.get("transcript_segments"))
             if has_transcript:
                 segments = task["transcript_segments"]
-                video = {key: task.get(key) for key in ("bvid", "page", "cid", "title", "author", "duration", "cover", "source_url")}
+                source = source_metadata(task)
                 summary = local_summary(task.get("title", ""), segments_text(segments), segments)
-                task["result"] = {**make_base_result(task, video, segments, task.get("method_base", "转录")), **summary, "method": f"{task.get('method_base', '转录')} + 本地原文提要", "summary_error": info}
+                base_method = task.get("method_base", "正文提取" if source.get("content_type") == "article" else "转录")
+                task["result"] = {**make_base_result(task, source, segments, base_method), **summary, "method": f"{base_method} + 本地原文提要", "summary_error": info}
                 task["available_results"] = ["transcript", "summary"]
                 RESULTS_BY_ID[job_id] = task["result"]
             save_task(task)
@@ -1430,9 +1686,14 @@ def ensure_result_structure(result, segments):
         return None
     result["segments"] = segments
     result["transcript"] = segments_text(segments)
-    page = normalize_page(result.get("page") or ((result.get("video") or {}).get("page")))
-    result["page"] = page
-    if result.get("bvid") and not result.get("video"):
+    content_type = result.get("content_type") or ("article" if result.get("article_id") or result.get("article") else "video")
+    result["content_type"] = content_type
+    if content_type == "video":
+        page = normalize_page(result.get("page") or ((result.get("video") or {}).get("page")))
+        result["page"] = page
+    else:
+        page = None
+    if content_type == "video" and result.get("bvid") and not result.get("video"):
         result["video"] = {
             "platform": "bilibili",
             "bvid": result["bvid"],
@@ -1441,6 +1702,14 @@ def ensure_result_structure(result, segments):
             "title": result.get("title"),
             "author": result.get("author"),
             "duration": result.get("duration"),
+        }
+    if content_type == "article" and not result.get("article"):
+        result["article"] = {
+            "platform": "bilibili",
+            "articleId": result.get("article_id"),
+            "sourceUrl": result.get("source_url"),
+            "title": result.get("title"),
+            "author": result.get("author"),
         }
     if not result.get("summary_type"):
         result["summary_type"] = "extractive" if "本地" in result.get("method", "") or result.get("method") == "兼容接口" else "generative"
@@ -1493,7 +1762,7 @@ def load_tasks():
                 legacy["transcript_segments"] = segments
                 legacy["available_results"] = ["transcript", "summary"]
                 legacy["method_base"] = result.get("method", "转录").split(" + ")[0]
-                for key in ("bvid", "page", "cid", "title", "author", "duration", "cover", "source_url"):
+                for key in ("content_type", "article_id", "bvid", "page", "cid", "title", "author", "duration", "cover", "source_url"):
                     if result.get(key) is not None:
                         legacy[key] = result[key]
             status_map = {"queued": "pending", "complete": "completed"}
@@ -1516,6 +1785,7 @@ def load_tasks():
 
 
 def transcript_markdown(result):
+    is_article = result.get("content_type") == "article" or bool(result.get("article_id"))
     segments = result.get("segments") or []
     if segments:
         transcript_blocks = []
@@ -1532,6 +1802,39 @@ def transcript_markdown(result):
         transcript = "\n\n".join(transcript_blocks)
     else:
         transcript = result.get("transcript", "")
+    if is_article:
+        return "\n".join([
+            f"# {result['title']}",
+            "",
+            "> **文章原文 · 留文**",
+            "",
+            "---",
+            "",
+            "## 文章信息",
+            "",
+            "| 项目 | 内容 |",
+            "| :--- | :--- |",
+            f"| 文章 | [{markdown_table_cell(result['title'])}]({result['source_url']}) |",
+            f"| 作者 | {markdown_table_cell(result.get('author', '未知'))} |",
+            f"| 提取方式 | {markdown_table_cell(result.get('method', 'B 站文章正文'))} |",
+            "",
+            "## 阅读说明",
+            "",
+            "- 原文按 B 站页面中的正文段落顺序整理。",
+            "- 图片仅保留页面提供的文字说明，不进行图片内容识别。",
+            "- 页面更新、删除或访问权限变化可能导致原文与导出内容不同，请以原页面为准。",
+            "",
+            "---",
+            "",
+            "## 完整原文",
+            "",
+            transcript,
+            "",
+            "---",
+            "",
+            "> 本文由 **留文 · WENL SCRIBE** 自动提取整理。",
+            "",
+        ])
     return "\n".join([
         f"# {result['title']}",
         "",
@@ -1568,6 +1871,7 @@ def transcript_markdown(result):
 
 
 def summary_markdown(result):
+    is_article = result.get("content_type") == "article" or bool(result.get("article_id"))
     claims = result.get("claims") or []
     if claims:
         sections = []
@@ -1578,7 +1882,7 @@ def summary_markdown(result):
                 f"### {index:02d}｜{item['claim']}",
                 "",
                 f"**内容类型：** {item.get('kind', '观点')}  ",
-                f"**原文位置：** [{timestamp_text(start)}–{timestamp_text(item.get('end'))}]({time_link})  " if start is not None else "**原文位置：** 旧任务无时间戳  ",
+                f"**原文位置：** [{timestamp_text(start)}–{timestamp_text(item.get('end'))}]({time_link})  " if start is not None else (f"**原文位置：** [查看文章原文]({result['source_url']})  " if is_article else "**原文位置：** 旧任务无时间戳  "),
                 "",
                 "> **原文依据**",
                 ">",
@@ -1598,6 +1902,27 @@ def summary_markdown(result):
             "",
         ])
     summary_label = "原文重点摘录" if result.get("summary_type") == "extractive" else "一句话总结"
+    if is_article:
+        information = [
+            "## 文章信息",
+            "",
+            "| 项目 | 内容 |",
+            "| :--- | :--- |",
+            f"| 文章 | [{markdown_table_cell(result['title'])}]({result['source_url']}) |",
+            f"| 作者 | {markdown_table_cell(result.get('author', '未知'))} |",
+            f"| 总结方式 | {markdown_table_cell(result.get('method', '未知'))} |",
+        ]
+    else:
+        information = [
+            "## 视频信息",
+            "",
+            "| 项目 | 内容 |",
+            "| :--- | :--- |",
+            f"| 视频 | [{markdown_table_cell(result['title'])}]({result['source_url']}) |",
+            f"| 作者 | {markdown_table_cell(result.get('author', '未知'))} |",
+            f"| 时长 | {timestamp_text(result.get('duration'))} |",
+            f"| 总结方式 | {markdown_table_cell(result.get('method', '未知'))} |",
+        ]
     document = [
         f"# {result['title']}",
         "",
@@ -1605,14 +1930,7 @@ def summary_markdown(result):
         "",
         "---",
         "",
-        "## 视频信息",
-        "",
-        "| 项目 | 内容 |",
-        "| :--- | :--- |",
-        f"| 视频 | [{markdown_table_cell(result['title'])}]({result['source_url']}) |",
-        f"| 作者 | {markdown_table_cell(result.get('author', '未知'))} |",
-        f"| 时长 | {timestamp_text(result.get('duration'))} |",
-        f"| 总结方式 | {markdown_table_cell(result.get('method', '未知'))} |",
+        *information,
         "",
         f"## {summary_label}",
         "",
@@ -1629,7 +1947,7 @@ def summary_markdown(result):
         "---",
         "",
         "> [!NOTE]",
-        "> 本文由 **留文 · WENL SCRIBE** 自动转录与总结生成。重要信息请点击时间戳回看原始内容核对。",
+        "> 本文由 **留文 · WENL SCRIBE** 自动提取与总结生成。重要信息请返回 B 站原文核对。" if is_article else "> 本文由 **留文 · WENL SCRIBE** 自动转录与总结生成。重要信息请点击时间戳回看原始内容核对。",
         "",
     ])
     return "\n".join(document)
@@ -1652,17 +1970,19 @@ def video_time_link(source_url, seconds):
 
 
 def export_filename(result, kind):
-    title = str((result or {}).get("title") or "未命名视频")
+    is_article = (result or {}).get("content_type") == "article" or bool((result or {}).get("article_id"))
+    fallback_title = "未命名文章" if is_article else "未命名视频"
+    title = str((result or {}).get("title") or fallback_title)
     title = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "", title)
     title = re.sub(r"\s+", " ", title).strip(" .")
-    title = title[:100].rstrip(" .") or "未命名视频"
-    label = "逐字稿" if kind == "transcript" else "总结"
+    title = title[:100].rstrip(" .") or fallback_title
+    label = ("原文" if is_article else "逐字稿") if kind == "transcript" else "总结"
     return f"{title}{label}留文.md"
 
 
 def content_disposition(filename):
     encoded = urllib.parse.quote(filename, safe="")
-    fallback = "wenl-transcript.md" if "逐字稿" in filename else "wenl-summary.md"
+    fallback = "wenl-transcript.md" if "逐字稿" in filename or "原文" in filename else "wenl-summary.md"
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
@@ -1675,7 +1995,7 @@ def resummarize_job(job_id, mode):
         task["status"] = "pending"
         task["stage"] = "pending"
         task["progress"] = 82
-        task["message"] = "逐字稿已保留，正在准备重新总结"
+        task["message"] = "原文已保留，正在准备重新总结"
         task["updated_at"] = now_ms()
         task.pop("error", None)
         task.pop("error_info", None)
@@ -1825,7 +2145,7 @@ class Handler(BaseHTTPRequestHandler):
             job_id = (urllib.parse.parse_qs(parsed.query).get("job_id") or [""])[0]
             result = RESULTS_BY_ID.get(job_id)
             if not result:
-                return self.send_json(404, {"error": "任务结果不存在，请重新处理视频"})
+                return self.send_json(404, {"error": "任务结果不存在，请重新处理内容"})
             if parsed.path.endswith("transcript"):
                 return self.send_markdown(transcript_markdown(result), export_filename(result, "transcript"))
             return self.send_markdown(summary_markdown(result), export_filename(result, "summary"))
@@ -1878,7 +2198,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(404, {"error": "Not found"})
             link = str(payload.get("url", "")).strip()
             if not link:
-                raise ValueError("请先粘贴视频链接或分享文案")
+                raise ValueError("请先粘贴 B 站视频、文章链接或分享文案")
             if self.path == "/api/jobs":
                 return self.send_json(202, create_job(
                     link,
@@ -1886,16 +2206,18 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("summary_mode", "auto"),
                     payload.get("language", "auto"),
                 ))
-            video = get_video(link)
-            segments = get_subtitles(video)
-            if not segments:
-                temp_job = uuid.uuid4().hex
-                CANCEL_EVENTS[temp_job] = threading.Event()
-                segments, _ = transcribe(temp_job, video, payload.get("model", "small"), payload.get("language", "auto"), lambda *args: None)
+            source, segments = get_source(link)
+            if segments is None:
+                segments = get_subtitles(source)
+                if not segments:
+                    temp_job = uuid.uuid4().hex
+                    CANCEL_EVENTS[temp_job] = threading.Event()
+                    segments, _ = transcribe(temp_job, source, payload.get("model", "small"), payload.get("language", "auto"), lambda *args: None)
             transcript = segments_text(segments)
-            summary = local_summary(video["title"], transcript, segments)
+            summary = local_summary(source["title"], transcript, segments)
             job_id = uuid.uuid4().hex
-            result = {**video, **summary, "method": "兼容接口", "transcript": transcript, "segments": segments, "job_id": job_id}
+            base_method = "B 站文章正文" if source.get("content_type") == "article" else "兼容接口"
+            result = {**make_base_result({"job_id": job_id}, source, segments, base_method), **summary}
             RESULTS_BY_ID[job_id] = result
             return self.send_json(200, result)
         except TaskError as exc:
@@ -1906,7 +2228,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path.startswith("/api/config") or self.path.endswith("/resummarize"):
                 self.send_json(400, {"error": f"总结服务返回错误 {exc.code}：{http_error_message(exc)}"})
             else:
-                self.send_json(400, {"error": f"视频服务返回错误 {exc.code}，请确认视频可以公开访问"})
+                self.send_json(400, {"error": f"B 站服务返回错误 {exc.code}，请确认内容可以公开访问"})
         except Exception as exc:
             self.send_json(500, {"error": f"处理失败：{exc}"})
 
