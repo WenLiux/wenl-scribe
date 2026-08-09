@@ -5,6 +5,7 @@ import pathlib
 import tempfile
 import unittest
 import urllib.error
+import zipfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -63,7 +64,7 @@ class BackendV04Tests(unittest.TestCase):
         <div class="opus-module-content opus-paragraph-children">
           <h2>第一部分</h2><p>这是一段足够长的文章正文，用于验证留文能够直接读取 B 站文章而不启动语音转录流程。</p>
           <p>第二段继续说明文章中的关键步骤和注意事项，供后续总结与原文依据校验使用。</p>
-          <figure><img data-src="//example.test/detail.png" alt="网络拓扑图"><figcaption>图一：组网结构</figcaption></figure>
+          <figure><img data-src="//i0.hdslb.com/bfs/new_dyn/detail.png" alt="网络拓扑图"><figcaption>图一：组网结构</figcaption></figure>
         </div></body></html>
         """
         article = server.parse_bilibili_article(html, "https://www.bilibili.com/opus/123", "123")
@@ -74,6 +75,52 @@ class BackendV04Tests(unittest.TestCase):
         self.assertTrue(any(item["text"] == "第一部分" and item["kind"] == "heading" for item in article["segments"]))
         self.assertTrue(any("网络拓扑图" in item["text"] and item["kind"] == "caption" for item in article["segments"]))
         self.assertTrue(all(item["start"] is None for item in article["segments"]))
+        image_blocks = [item for item in article["article_blocks"] if item["kind"] == "image"]
+        self.assertEqual(len(image_blocks), 1)
+        self.assertEqual(image_blocks[0]["image_index"], 0)
+        self.assertEqual(image_blocks[0]["image_url"], "https://i0.hdslb.com/bfs/new_dyn/detail.png")
+
+    def test_article_images_are_cached_per_task_and_reject_untrusted_hosts(self):
+        original_task_dir = server.TASK_DIR
+        original_urlopen = server.urllib.request.urlopen
+        payload = b"\x89PNG\r\n\x1a\narticle-image"
+
+        class FakeHeaders:
+            def get_content_type(self):
+                return "image/png"
+
+            def get(self, name, default=None):
+                return str(len(payload)) if name == "Content-Length" else default
+
+        class FakeResponse(io.BytesIO):
+            headers = FakeHeaders()
+
+            def geturl(self):
+                return "https://i0.hdslb.com/bfs/new_dyn/detail.png"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server.TASK_DIR = pathlib.Path(directory)
+                server.urllib.request.urlopen = lambda *_args, **_kwargs: FakeResponse(payload)
+                raw, content_type = server.load_article_image("a" * 32, 3, "https://i0.hdslb.com/bfs/new_dyn/detail.png")
+                self.assertEqual(raw, payload)
+                self.assertEqual(content_type, "image/png")
+                self.assertTrue((server.TASK_DIR / ("a" * 32) / "images" / "003.png").exists())
+                server.urllib.request.urlopen = lambda *_args, **_kwargs: self.fail("缓存命中时不应再次下载")
+                cached, cached_type = server.load_article_image("a" * 32, 3, "https://i0.hdslb.com/bfs/new_dyn/detail.png")
+                self.assertEqual(cached, payload)
+                self.assertEqual(cached_type, "image/png")
+                with self.assertRaises(ValueError):
+                    server.load_article_image("a" * 32, 4, "https://hdslb.com.example.test/detail.png")
+        finally:
+            server.TASK_DIR = original_task_dir
+            server.urllib.request.urlopen = original_urlopen
 
     def test_article_job_skips_subtitles_and_whisper(self):
         original_task_dir = server.TASK_DIR
@@ -344,6 +391,39 @@ class BackendV04Tests(unittest.TestCase):
         self.assertIn("[查看文章原文](https://www.bilibili.com/opus/123)", summary)
         self.assertNotIn("旧任务无时间戳", summary)
         self.assertEqual(server.export_filename(result, "transcript"), "组网教程原文留文.md")
+
+    def test_article_package_contains_ordered_markdown_and_local_images(self):
+        original_load_article_image = server.load_article_image
+        result = {
+            "job_id": "c" * 32,
+            "content_type": "article",
+            "article_id": "123",
+            "title": "组网/教程",
+            "author": "测试作者",
+            "source_url": "https://www.bilibili.com/opus/123",
+            "method": "B 站文章正文",
+            "transcript": "第一段\n第二段",
+            "article_blocks": [
+                {"kind": "heading", "text": "准备工作"},
+                {"kind": "paragraph", "text": "第一段"},
+                {"kind": "image", "image_url": "https://i0.hdslb.com/a.png", "alt": "拓扑图", "image_index": 0},
+                {"kind": "paragraph", "text": "第二段"},
+            ],
+        }
+        try:
+            server.load_article_image = lambda job_id, image_index, image_url: (b"PNG-DATA", "image/png")
+            raw = server.build_article_package(result)
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                self.assertEqual(set(archive.namelist()), {"组网教程原文留文.md", "images/001.png"})
+                markdown = archive.read("组网教程原文留文.md").decode("utf-8-sig")
+                self.assertIn("![拓扑图](images/001.png)", markdown)
+                self.assertLess(markdown.index("第一段"), markdown.index("![拓扑图]"))
+                self.assertLess(markdown.index("![拓扑图]"), markdown.index("第二段"))
+                self.assertEqual(archive.read("images/001.png"), b"PNG-DATA")
+            self.assertEqual(server.article_package_filename(result), "组网教程图文留文.zip")
+            self.assertIn("wenl-article-package.zip", server.content_disposition("组网教程图文留文.zip"))
+        finally:
+            server.load_article_image = original_load_article_image
 
     def test_transcript_can_be_saved_before_summary_exists(self):
         original_task_dir = server.TASK_DIR

@@ -63,7 +63,7 @@ h1 em { font-style:normal; color:var(--green); }
 .articleResultEyebrow small { color:var(--muted); font:10px ui-monospace,monospace; letter-spacing:.04em; }
 .articleResultHero h1 { max-width:1080px; font-size:clamp(38px,5.2vw,68px); line-height:1.14; letter-spacing:-.045em; }
 .articleResultHero>p { margin:22px 0 34px; color:var(--muted); font:16px/1.7 Georgia,"Noto Serif SC",serif; }
-.articleHeroMeta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)) auto; border:1px solid var(--line); background:var(--panel); }
+.articleHeroMeta { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)) auto; border:1px solid var(--line); background:var(--panel); }
 .articleHeroMeta>div { min-height:84px; display:flex; flex-direction:column; justify-content:center; gap:8px; padding:16px 20px; border-right:1px solid var(--line); }
 .articleHeroMeta small { color:var(--muted); font-size:10px; letter-spacing:.08em; }
 .articleHeroMeta strong { font:18px Georgia,"Noto Serif SC",serif; }
@@ -106,7 +106,7 @@ h1 em { font-style:normal; color:var(--green); }
 .toolbar { min-height:70px; display:flex; align-items:center; justify-content:space-between; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }
 .tabs { align-self:stretch; display:flex; }.tabs button { border:0; border-right:1px solid var(--line); background:transparent; padding:0 28px; color:var(--muted); font-weight:700; }
 .tabs button:first-child { border-left:1px solid var(--line); }.tabs button.active { background:var(--ink); color:white; }
-.actions { display:flex; align-items:center; gap:8px; }.copy,.download { border:1px solid var(--ink); padding:11px 16px; background:transparent; text-decoration:none; font-size:12px; font-weight:700; }
+.actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px; }.copy,.download { border:1px solid var(--ink); padding:11px 16px; background:transparent; text-decoration:none; font-size:12px; font-weight:700; }
 .download { background:var(--green); border-color:var(--green); color:white; }.copy:hover { background:var(--soft); }.download:hover { background:#465a45; }
 .autoFloatToggle { min-height:38px; display:flex; align-items:center; gap:7px; padding:0 11px; border:1px solid var(--line); color:var(--muted); background:var(--panel); font-size:11px; white-space:nowrap; cursor:pointer; }
 .autoFloatToggle input,.settingToggle input { accent-color:var(--green); }
@@ -172,6 +172,14 @@ h1 em { font-style:normal; color:var(--green); }
 .articleBody>blockquote { margin:28px 0; padding:18px 22px; border-left:3px solid var(--green); background:var(--green-soft); font:16px/1.85 Georgia,"Noto Serif SC",serif; }
 .articleBody>pre { overflow:auto; margin:28px 0; padding:18px 20px; background:#232721; color:#eff2ec; font:13px/1.7 ui-monospace,monospace; }
 .articleCaption { margin-top:-10px!important; color:var(--muted)!important; font:12px/1.7 system-ui,sans-serif!important; text-align:center; }
+.articleImageBlock { margin:38px 0 42px; }
+.articleImageCanvas { display:grid; place-items:center; overflow:hidden; min-height:120px; border:1px solid var(--line); background:#ecece6; }
+.articleImageCanvas img { display:block; max-width:100%; width:auto; height:auto; max-height:900px; object-fit:contain; }
+.articleImageBlock figcaption { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:10px 2px 0; color:var(--muted); font-size:11px; line-height:1.6; }
+.articleImageBlock figcaption span { color:var(--green); font-size:9px; font-weight:700; letter-spacing:.12em; white-space:nowrap; }
+.articleImageFallback { display:none; min-height:160px; align-items:center; justify-content:center; padding:24px; color:var(--muted); font-size:12px; text-align:center; }
+.articleImageBlock.isUnavailable img { display:none; }
+.articleImageBlock.isUnavailable .articleImageFallback { display:flex; }
 .articleListItem { display:grid; grid-template-columns:20px 1fr; gap:8px; margin:0 0 15px; }
 .articleListItem>span { color:var(--green); }
 .articleListItem p { margin:0; font:16px/1.85 Georgia,"Noto Serif SC",serif; }
@@ -295,8 +303,8 @@ footer { border-top:1px solid var(--line); padding:22px clamp(20px,5vw,72px); di
   .nav { grid-template-columns:1fr auto; backdrop-filter:none; }.nav nav { position:fixed; left:0; right:0; bottom:0; top:auto; height:58px; background:var(--panel); border-top:1px solid var(--line); justify-content:space-around; z-index:20; }.nav nav button { flex:1; }.localBadge { display:none; }
   .homeHero { padding-top:70px; min-height:calc(100vh - 130px); }.inputRow { flex-direction:column; }.inputRow button { height:54px; }.inputFoot span { display:none; }
   .taskPage,.workbench,.panelPage { width:calc(100% - 32px); padding-top:34px; }.taskIntro { grid-template-columns:1fr; }.progressNumber { text-align:right; }.stageList { grid-template-columns:repeat(2,1fr); }.stage { min-height:82px; }.stage p { margin-top:24px; }.taskMeta { flex-wrap:wrap; gap:10px 20px; }
-  .resultHead { grid-template-columns:1fr; }.coverFrame { max-width:300px; }.playerFoot { align-items:flex-start; flex-direction:column; gap:6px; padding:12px 14px; }.toolbar { align-items:stretch; flex-direction:column; padding-bottom:12px; }.tabs { min-height:56px; }.tabs button { flex:1; }.actions>* { flex:1; text-align:center; }
-  .articleResultEyebrow { align-items:flex-start; flex-direction:column; gap:7px; }.articleResultHero h1 { font-size:36px; }.articleResultHero>p { margin-bottom:24px; }.articleHeroMeta { grid-template-columns:1fr 1fr; }.articleHeroMeta>div:nth-child(2) { border-right:0; }.articleHeroMeta>div:nth-child(3) { border-top:1px solid var(--line); }.articleHeroMeta>a { grid-column:1/-1; min-height:54px; }.articleToolbar { top:72px; }.articleToolbar .tabs button { min-width:0; }.articleSummaryStatus { align-items:flex-start; flex-direction:column; }.articleSummaryStatus>div { align-items:flex-start; flex-direction:column; gap:5px; }.articleDigest { grid-template-columns:1fr; gap:24px; padding-top:40px; }.articleSectionHeading { align-items:flex-start; flex-direction:column; }.articleSectionHeading>p { text-align:left; }.articleClaimGrid { grid-template-columns:1fr; }.articleClaimGrid>article:last-child:nth-child(odd) { grid-column:auto; }.articleReadingGrid.withToc { display:block; }.articleToc { display:none; }.articleReadingGrid { padding-top:38px; }.articleBody>h2 { grid-template-columns:34px 1fr; font-size:24px; }.articleReadingFoot { align-items:flex-start; flex-direction:column; }
+  .resultHead { grid-template-columns:1fr; }.coverFrame { max-width:300px; }.playerFoot { align-items:flex-start; flex-direction:column; gap:6px; padding:12px 14px; }.toolbar { align-items:stretch; flex-direction:column; padding-bottom:12px; }.tabs { min-height:56px; }.tabs button { flex:1; }.actions { padding:0 12px; }.actions>* { flex:1 1 calc(50% - 8px); text-align:center; }
+  .articleResultEyebrow { align-items:flex-start; flex-direction:column; gap:7px; }.articleResultHero h1 { font-size:36px; }.articleResultHero>p { margin-bottom:24px; }.articleHeroMeta { grid-template-columns:1fr 1fr; }.articleHeroMeta>div:nth-child(2),.articleHeroMeta>div:nth-child(4) { border-right:0; }.articleHeroMeta>div:nth-child(3),.articleHeroMeta>div:nth-child(4) { border-top:1px solid var(--line); }.articleHeroMeta>a { grid-column:1/-1; min-height:54px; }.articleToolbar { top:72px; }.articleToolbar .tabs button { min-width:0; }.articleSummaryStatus { align-items:flex-start; flex-direction:column; }.articleSummaryStatus>div { align-items:flex-start; flex-direction:column; gap:5px; }.articleDigest { grid-template-columns:1fr; gap:24px; padding-top:40px; }.articleSectionHeading { align-items:flex-start; flex-direction:column; }.articleSectionHeading>p { text-align:left; }.articleClaimGrid { grid-template-columns:1fr; }.articleClaimGrid>article:last-child:nth-child(odd) { grid-column:auto; }.articleReadingGrid.withToc { display:block; }.articleToc { display:none; }.articleReadingGrid { padding-top:38px; }.articleBody>h2 { grid-template-columns:34px 1fr; font-size:24px; }.articleImageBlock { margin:30px 0 34px; }.articleImageBlock figcaption { align-items:flex-start; flex-direction:column; gap:3px; }.articleReadingFoot { align-items:flex-start; flex-direction:column; }
   .floatingVideoBar { padding-left:10px; }
   .floatingVideoLauncher.default-left { left:12px; right:auto; bottom:calc(var(--app-bottom-safe-area) + 12px + env(safe-area-inset-bottom,0px)); }
   .floatingVideoLauncher.default-right { left:auto; right:12px; bottom:calc(var(--app-bottom-safe-area) + 12px + env(safe-area-inset-bottom,0px)); }

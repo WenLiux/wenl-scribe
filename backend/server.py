@@ -1,3 +1,4 @@
+import io
 import json
 import mimetypes
 import os
@@ -12,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from collections import Counter
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,6 +48,17 @@ API = "https://api.bilibili.com"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 MODEL_PROBE_MAX_OUTPUT_TOKENS = 256
 MODEL_PROBE_RETRY_OUTPUT_TOKENS = 1024
+ARTICLE_IMAGE_MAX_COUNT = 80
+ARTICLE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
+ARTICLE_PACKAGE_MAX_BYTES = 256 * 1024 * 1024
+ARTICLE_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/avif": ".avif",
+}
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", ROOT))
 IS_FROZEN = bool(getattr(sys, "frozen", False))
@@ -155,6 +168,28 @@ def atomic_write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(text, encoding="utf-8")
+    try:
+        for attempt in range(6):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def atomic_write_bytes(path, raw):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_bytes(raw)
     try:
         for attempt in range(6):
             try:
@@ -465,6 +500,7 @@ class BilibiliArticleHTMLParser(HTMLParser):
                 alt = self._clean(attributes.get("alt"))
                 if source:
                     self.images.append({"url": source, "alt": alt})
+                    self.blocks.append({"url": source, "alt": alt, "kind": "image"})
                 if alt and alt.lower() not in {"image", "图片", "哔哩哔哩"}:
                     self.blocks.append({"text": alt, "kind": "caption"})
 
@@ -519,13 +555,28 @@ def parse_bilibili_article(html, source_url, article_id):
     title = re.sub(r"\s*[-_]\s*哔哩哔哩\s*$", "", title).strip()
     author = parser._clean("".join(parser.author_parts)) or parser.meta.get("author") or "未知作者"
     blocks = []
+    article_blocks = []
+    image_count = 0
     seen = set()
     for block in parser.blocks:
         item = block if isinstance(block, dict) else {"text": block, "kind": "paragraph"}
+        if item.get("kind") == "image":
+            image_url = str(item.get("url") or "").strip()
+            if image_url and image_count < ARTICLE_IMAGE_MAX_COUNT:
+                article_blocks.append({
+                    "kind": "image",
+                    "image_url": image_url,
+                    "alt": parser._clean(item.get("alt")),
+                    "image_index": image_count,
+                })
+                image_count += 1
+            continue
         text = parser._clean(item.get("text"))
         signature = re.sub(r"\s+", "", text)
         if text and signature not in seen:
-            blocks.append({"text": text, "kind": item.get("kind") or "paragraph"})
+            text_block = {"text": text, "kind": item.get("kind") or "paragraph"}
+            blocks.append(text_block)
+            article_blocks.append(text_block)
             seen.add(signature)
     if not title:
         raise TaskError("ARTICLE_FETCH_FAILED", "未能读取文章标题，请确认文章可以公开访问。", "parsing")
@@ -540,6 +591,7 @@ def parse_bilibili_article(html, source_url, article_id):
         "duration": 0,
         "cover": cover,
         "source_url": source_url,
+        "article_blocks": article_blocks,
         "segments": [
             {**normalize_segment({"text": block["text"]}, "bilibili_article"), "kind": block["kind"]}
             for block in blocks
@@ -562,6 +614,46 @@ def get_article(link):
         else f"https://www.bilibili.com/opus/{article_id}"
     )
     return parse_bilibili_article(html, canonical_url, article_id)
+
+
+def is_bilibili_image_url(value):
+    parsed = urllib.parse.urlparse(str(value or ""))
+    hostname = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (hostname == "hdslb.com" or hostname.endswith(".hdslb.com"))
+
+
+def load_article_image(job_id, image_index, image_url):
+    if not re.fullmatch(r"[a-f0-9]{32}", str(job_id or "")):
+        raise ValueError("无效的任务编号")
+    if not is_bilibili_image_url(image_url):
+        raise ValueError("不支持的文章图片地址")
+    image_directory = task_dir(job_id) / "images"
+    for content_type, extension in ARTICLE_IMAGE_TYPES.items():
+        cached = image_directory / f"{int(image_index):03d}{extension}"
+        if cached.is_file() and 0 < cached.stat().st_size <= ARTICLE_IMAGE_MAX_BYTES:
+            return cached.read_bytes(), content_type
+
+    request = urllib.request.Request(image_url, headers={"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        final_url = response.geturl()
+        if not is_bilibili_image_url(final_url):
+            raise ValueError("文章图片跳转到了不支持的地址")
+        content_type = response.headers.get_content_type().lower()
+        extension = ARTICLE_IMAGE_TYPES.get(content_type)
+        if not extension:
+            raise ValueError("不支持的文章图片格式")
+        try:
+            content_length = int(response.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            content_length = 0
+        if content_length > ARTICLE_IMAGE_MAX_BYTES:
+            raise ValueError("文章图片超过单张大小限制")
+        raw = response.read(ARTICLE_IMAGE_MAX_BYTES + 1)
+    if not raw or len(raw) > ARTICLE_IMAGE_MAX_BYTES:
+        raise ValueError("文章图片为空或超过单张大小限制")
+    cached = image_directory / f"{int(image_index):03d}{extension}"
+    atomic_write_bytes(cached, raw)
+    return raw, content_type
 
 
 def get_source(link):
@@ -1433,7 +1525,7 @@ def set_stage(job_id, stage, detail=None, progress=None, progress_detail=None):
 
 
 def task_metadata(task):
-    keys = ("job_id", "input", "content_type", "article_id", "model", "summary_mode", "summary_provider", "summary_protocol", "summary_model", "language", "title", "author", "duration", "cover", "source_url", "bvid", "page", "cid", "created_at", "method_base", "detected_language")
+    keys = ("job_id", "input", "content_type", "article_id", "article_blocks", "model", "summary_mode", "summary_provider", "summary_protocol", "summary_model", "language", "title", "author", "duration", "cover", "source_url", "bvid", "page", "cid", "created_at", "method_base", "detected_language")
     return {key: task.get(key) for key in keys if task.get(key) is not None}
 
 
@@ -1459,7 +1551,7 @@ def save_task(task):
 
 
 def source_metadata(task):
-    keys = ("content_type", "article_id", "bvid", "page", "cid", "title", "author", "duration", "cover", "source_url")
+    keys = ("content_type", "article_id", "article_blocks", "bvid", "page", "cid", "title", "author", "duration", "cover", "source_url")
     return {key: task.get(key) for key in keys if task.get(key) is not None}
 
 
@@ -1969,20 +2061,132 @@ def video_time_link(source_url, seconds):
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment))
 
 
-def export_filename(result, kind):
+def export_title(result):
     is_article = (result or {}).get("content_type") == "article" or bool((result or {}).get("article_id"))
     fallback_title = "未命名文章" if is_article else "未命名视频"
     title = str((result or {}).get("title") or fallback_title)
     title = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "", title)
     title = re.sub(r"\s+", " ", title).strip(" .")
-    title = title[:100].rstrip(" .") or fallback_title
+    return title[:100].rstrip(" .") or fallback_title
+
+
+def export_filename(result, kind):
+    is_article = (result or {}).get("content_type") == "article" or bool((result or {}).get("article_id"))
+    title = export_title(result)
     label = ("原文" if is_article else "逐字稿") if kind == "transcript" else "总结"
     return f"{title}{label}留文.md"
 
 
+def article_package_filename(result):
+    return f"{export_title(result)}图文留文.zip"
+
+
+def article_markdown_with_images(result, image_paths):
+    body = []
+    blocks = result.get("article_blocks") or []
+    for block_position, block in enumerate(blocks):
+        kind = block.get("kind") or "paragraph"
+        if kind == "image":
+            image_path = image_paths.get(block_position)
+            if image_path:
+                alt = re.sub(r"[\[\]\r\n]+", " ", str(block.get("alt") or "文章配图")).strip() or "文章配图"
+                body.append(f"![{alt}]({image_path})")
+            continue
+        text = str(block.get("text") or "").strip()
+        if not text:
+            continue
+        if kind == "heading":
+            body.append(f"### {text}")
+        elif kind == "list_item":
+            body.append(f"- {text}")
+        elif kind == "quote":
+            body.append(markdown_quote(text))
+        elif kind == "code":
+            body.append(f"```text\n{text}\n```")
+        elif kind == "caption":
+            body.append(f"*{text}*")
+        else:
+            body.append(text)
+    if not body:
+        body.append(result.get("transcript", ""))
+    return "\n".join([
+        f"# {result['title']}",
+        "",
+        "> **文章原文 · 留文离线图文包**",
+        "",
+        "---",
+        "",
+        "## 文章信息",
+        "",
+        "| 项目 | 内容 |",
+        "| :--- | :--- |",
+        f"| 文章 | [{markdown_table_cell(result['title'])}]({result['source_url']}) |",
+        f"| 作者 | {markdown_table_cell(result.get('author', '未知'))} |",
+        f"| 提取方式 | {markdown_table_cell(result.get('method', 'B 站文章正文'))} |",
+        "",
+        "## 阅读说明",
+        "",
+        "- 正文和图片按 B 站页面中的原始顺序整理。",
+        "- 图片保存在同级 `images` 目录，请勿单独移动 Markdown 文件。",
+        "- 页面更新、删除或访问权限变化不会影响已经下载到本图文包中的图片。",
+        "",
+        "---",
+        "",
+        "## 完整原文",
+        "",
+        "\n\n".join(body),
+        "",
+        "---",
+        "",
+        "> 本文由 **留文 · WENL SCRIBE** 自动提取整理。",
+        "",
+    ])
+
+
+def build_article_package(result):
+    if not result or result.get("content_type") != "article":
+        raise ValueError("只有文章任务可以下载图文包")
+    blocks = result.get("article_blocks") or []
+    image_entries = []
+    image_paths = {}
+    image_ordinal = 0
+    total_bytes = 0
+    for block_position, block in enumerate(blocks):
+        if block.get("kind") != "image":
+            continue
+        image_index = block.get("image_index")
+        if not isinstance(image_index, int):
+            image_index = image_ordinal
+        raw, content_type = load_article_image(result.get("job_id"), image_index, block.get("image_url"))
+        extension = ARTICLE_IMAGE_TYPES.get(content_type)
+        if not extension:
+            raise ValueError("图文包中包含不支持的图片格式")
+        total_bytes += len(raw)
+        if total_bytes > ARTICLE_PACKAGE_MAX_BYTES:
+            raise ValueError("文章图片总大小超过图文包上限")
+        archive_path = f"images/{image_ordinal + 1:03d}{extension}"
+        image_paths[block_position] = archive_path
+        image_entries.append((archive_path, raw))
+        image_ordinal += 1
+    if not image_entries:
+        raise ValueError("这篇文章没有可打包的正文图片，请重新处理文章后再试")
+
+    markdown_name = export_filename(result, "transcript")
+    markdown = article_markdown_with_images(result, image_paths)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(markdown_name, ("\ufeff" + markdown).encode("utf-8"))
+        for archive_path, raw in image_entries:
+            archive.writestr(archive_path, raw)
+    return buffer.getvalue()
+
+
 def content_disposition(filename):
     encoded = urllib.parse.quote(filename, safe="")
-    fallback = "wenl-transcript.md" if "逐字稿" in filename or "原文" in filename else "wenl-summary.md"
+    if str(filename).lower().endswith(".zip"):
+        fallback = "wenl-article-package.zip"
+    else:
+        fallback = "wenl-transcript.md" if "逐字稿" in filename or "原文" in filename else "wenl-summary.md"
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
@@ -2075,11 +2279,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.cors(); self.end_headers(); self.wfile.write(raw)
 
+    def send_archive(self, raw, filename):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", content_disposition(filename))
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.cors(); self.end_headers(); self.wfile.write(raw)
+
     def send_image(self, raw, content_type):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "public, max-age=86400")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.cors(); self.end_headers(); self.wfile.write(raw)
 
     def send_static_file(self, path):
@@ -2137,10 +2351,42 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_image(response.read(), response.headers.get_content_type())
             except Exception:
                 return self.send_json(502, {"error": "封面加载失败"})
+        article_image_match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})/images/(\d+)", parsed.path)
+        if article_image_match:
+            job_id, raw_index = article_image_match.groups()
+            result = RESULTS_BY_ID.get(job_id) or ((TASKS.get(job_id) or {}).get("result"))
+            if not result or result.get("content_type") != "article":
+                return self.send_json(404, {"error": "文章任务不存在"})
+            image_index = int(raw_index)
+            image_block = next((
+                block for block in (result.get("article_blocks") or [])
+                if block.get("kind") == "image" and block.get("image_index") == image_index
+            ), None)
+            if not image_block:
+                return self.send_json(404, {"error": "文章图片不存在"})
+            try:
+                raw, content_type = load_article_image(job_id, image_index, image_block.get("image_url"))
+                return self.send_image(raw, content_type)
+            except ValueError as exc:
+                return self.send_json(400, {"error": str(exc)})
+            except Exception:
+                return self.send_json(502, {"error": "文章图片加载失败"})
         job_match = re.fullmatch(r"/api/jobs/([a-f0-9]{32})", parsed.path)
         if job_match:
             task = TASKS.get(job_match.group(1))
             return self.send_json(200, public_task(task)) if task else self.send_json(404, {"error": "任务不存在"})
+        if parsed.path == "/api/download/article-package":
+            job_id = (urllib.parse.parse_qs(parsed.query).get("job_id") or [""])[0]
+            result = RESULTS_BY_ID.get(job_id)
+            if not result:
+                return self.send_json(404, {"error": "任务结果不存在，请重新处理内容"})
+            try:
+                package = build_article_package(result)
+                return self.send_archive(package, article_package_filename(result))
+            except ValueError as exc:
+                return self.send_json(400, {"error": str(exc)})
+            except Exception:
+                return self.send_json(502, {"error": "图文包生成失败，请确认文章图片仍可访问"})
         if parsed.path in ("/api/download/transcript", "/api/download/summary"):
             job_id = (urllib.parse.parse_qs(parsed.query).get("job_id") or [""])[0]
             result = RESULTS_BY_ID.get(job_id)
