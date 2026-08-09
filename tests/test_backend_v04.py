@@ -46,6 +46,83 @@ class BackendV04Tests(unittest.TestCase):
             server.resolve_bvid = original_resolve_bvid
             server.request_json = original_request_json
 
+    def test_resolve_bilibili_article_and_reject_lookalike_host(self):
+        resolved = server.resolve_bilibili_link("【文章分享】 https://www.bilibili.com/opus/1224392457667477526?from=share")
+        self.assertEqual(resolved["content_type"], "article")
+        self.assertEqual(resolved["article_id"], "1224392457667477526")
+        legacy = server.resolve_bilibili_link("https://www.bilibili.com/read/cv123456")
+        self.assertEqual(legacy["article_id"], "cv123456")
+        with self.assertRaises(ValueError):
+            server.resolve_bilibili_link("https://bilibili.com.example.test/opus/123")
+
+    def test_parse_bilibili_article_extracts_server_rendered_content(self):
+        html = """
+        <html><head><title>备用标题 - 哔哩哔哩</title><meta property="og:image" content="https://example.test/cover.jpg"></head>
+        <body><div class="opus-module-title__text"><span>文章标题</span></div>
+        <a class="opus-module-author__name">文章作者</a>
+        <div class="opus-module-content opus-paragraph-children">
+          <h2>第一部分</h2><p>这是一段足够长的文章正文，用于验证留文能够直接读取 B 站文章而不启动语音转录流程。</p>
+          <p>第二段继续说明文章中的关键步骤和注意事项，供后续总结与原文依据校验使用。</p>
+          <figure><img data-src="//example.test/detail.png" alt="网络拓扑图"><figcaption>图一：组网结构</figcaption></figure>
+        </div></body></html>
+        """
+        article = server.parse_bilibili_article(html, "https://www.bilibili.com/opus/123", "123")
+        self.assertEqual(article["content_type"], "article")
+        self.assertEqual(article["title"], "文章标题")
+        self.assertEqual(article["author"], "文章作者")
+        self.assertEqual(article["cover"], "https://example.test/cover.jpg")
+        self.assertTrue(any(item["text"] == "第一部分" and item["kind"] == "heading" for item in article["segments"]))
+        self.assertTrue(any("网络拓扑图" in item["text"] and item["kind"] == "caption" for item in article["segments"]))
+        self.assertTrue(all(item["start"] is None for item in article["segments"]))
+
+    def test_article_job_skips_subtitles_and_whisper(self):
+        original_task_dir = server.TASK_DIR
+        original_get_source = server.get_source
+        original_get_subtitles = server.get_subtitles
+        original_transcribe = server.transcribe
+        original_load_summary_config = server.load_summary_config
+        job_id = "f" * 32
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server.TASK_DIR = pathlib.Path(directory)
+                article_segments = [
+                    {"start": None, "end": None, "text": "第一段文章正文说明组网目标和实施范围。", "source": "bilibili_article"},
+                    {"start": None, "end": None, "text": "第二段文章正文说明具体配置步骤和验证方法。", "source": "bilibili_article"},
+                ]
+                server.get_source = lambda _link: ({
+                    "content_type": "article", "article_id": "123", "title": "文章任务",
+                    "author": "测试作者", "duration": 0, "cover": "",
+                    "source_url": "https://www.bilibili.com/opus/123",
+                }, article_segments)
+                server.get_subtitles = lambda _source: self.fail("文章任务不应读取视频字幕")
+                server.transcribe = lambda *_args, **_kwargs: self.fail("文章任务不应启动 Whisper")
+                server.load_summary_config = lambda: {
+                    "provider": "local", "protocol": "local", "model": "", "configured": False,
+                }
+                server.TASKS[job_id] = {
+                    "job_id": job_id, "input": "https://www.bilibili.com/opus/123",
+                    "status": "pending", "stage": "pending", "progress": 2, "message": "准备",
+                    "model": "small", "language": "auto", "summary_mode": "local",
+                    "created_at": server.now_ms(), "updated_at": server.now_ms(),
+                }
+                server.CANCEL_EVENTS[job_id] = server.threading.Event()
+                server.run_job(job_id)
+                task = server.TASKS[job_id]
+                self.assertEqual(task["status"], "completed")
+                self.assertEqual(task["result"]["content_type"], "article")
+                self.assertNotIn("video", task["result"])
+                self.assertEqual(task["result"]["article"]["articleId"], "123")
+                self.assertTrue((server.TASK_DIR / job_id / "transcript.md").exists())
+        finally:
+            server.TASK_DIR = original_task_dir
+            server.get_source = original_get_source
+            server.get_subtitles = original_get_subtitles
+            server.transcribe = original_transcribe
+            server.load_summary_config = original_load_summary_config
+            server.TASKS.pop(job_id, None)
+            server.CANCEL_EVENTS.pop(job_id, None)
+            server.RESULTS_BY_ID.pop(job_id, None)
+
     def test_evidence_spanning_segments_keeps_time_range(self):
         segments = [
             {"start": 10, "end": 14, "text": "政策调整需要观察", "source": "test"},
@@ -242,6 +319,31 @@ class BackendV04Tests(unittest.TestCase):
         disposition = server.content_disposition("白发魔女总结留文.md")
         self.assertIn("filename*=UTF-8''", disposition)
         self.assertIn("%E7%99%BD%E5%8F%91%E9%AD%94%E5%A5%B3", disposition)
+
+    def test_article_markdown_uses_article_labels_without_timestamps(self):
+        result = {
+            "content_type": "article",
+            "article_id": "123",
+            "title": "组网教程",
+            "author": "测试作者",
+            "duration": 0,
+            "source_url": "https://www.bilibili.com/opus/123",
+            "method": "B 站文章正文 + 本地原文提要",
+            "summary_type": "extractive",
+            "summary": "这是文章摘要。",
+            "segments": [{"start": None, "end": None, "text": "这是文章原文。"}],
+            "transcript": "这是文章原文。",
+            "claims": [{"claim": "文章观点", "evidence": "这是文章原文。", "kind": "原文摘录", "start": None, "end": None}],
+            "outline": [],
+        }
+        transcript = server.transcript_markdown(result)
+        summary = server.summary_markdown(result)
+        self.assertIn("## 文章信息", transcript)
+        self.assertIn("## 完整原文", transcript)
+        self.assertNotIn("时长", transcript)
+        self.assertIn("[查看文章原文](https://www.bilibili.com/opus/123)", summary)
+        self.assertNotIn("旧任务无时间戳", summary)
+        self.assertEqual(server.export_filename(result, "transcript"), "组网教程原文留文.md")
 
     def test_transcript_can_be_saved_before_summary_exists(self):
         original_task_dir = server.TASK_DIR

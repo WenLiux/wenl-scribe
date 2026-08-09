@@ -8,12 +8,15 @@ import { locateEvidenceTimestamp } from "./components/video/evidence";
 import { useVideoSeek } from "./components/video/useVideoSeek";
 import type { BilibiliVideoInfo } from "./components/video/types";
 
-type TranscriptSegment = { start: number | null; end: number | null; text: string; source?: string };
+type ArticleBlockKind = "heading" | "paragraph" | "list_item" | "quote" | "code" | "caption" | "table_cell";
+type TranscriptSegment = { start: number | null; end: number | null; text: string; source?: string; kind?: ArticleBlockKind };
 type Claim = { claim: string; evidence: string; kind: string; start: number | null; end: number | null; context?: string; verified?: boolean };
 type ErrorInfo = { code: string; message: string; stage?: string; retryable?: boolean };
 type Result = {
   job_id: string; title: string; author: string; duration: number; cover?: string;
+  content_type?: "video" | "article"; article_id?: string;
   source_url: string; bvid?: string; page?: number; video?: BilibiliVideoInfo;
+  article?: { platform: "bilibili"; articleId?: string; sourceUrl?: string; title?: string; author?: string };
   method: string; summary: string; key_points: string[]; transcript: string;
   outline?: { title: string; content: string }[]; evidence?: string[]; summary_type?: "extractive" | "generative";
   segments?: TranscriptSegment[]; claims?: Claim[]; summary_error?: ErrorInfo;
@@ -23,6 +26,7 @@ type Task = {
   job_id: string; status: "pending" | "processing" | "completed" | "partial" | "failed" | "cancelled";
   stage: string; progress: number; message: string; created_at: number; updated_at: number;
   model: string; language?: string; summary_mode: string; title?: string; author?: string; duration?: number;
+  content_type?: "video" | "article"; article_id?: string; source_url?: string;
   cover?: string; bvid?: string; page?: number; error?: string; error_info?: ErrorInfo; warning?: ErrorInfo; result?: Result;
   progress_detail?: Record<string, number>; available_results?: string[];
 };
@@ -88,10 +92,11 @@ const API = typeof window !== "undefined" && window.location.port === "3001"
   ? "http://127.0.0.1:8765"
   : "";
 const EXAMPLE = "【分享示例】 https://b23.tv/UXgYm0R";
-const STAGE_ORDER = ["parsing", "checking_subtitles", "downloading", "loading_model", "transcribing", "cleaning", "summarizing", "validating", "completed"];
+const VIDEO_STAGE_ORDER = ["parsing", "checking_subtitles", "downloading", "loading_model", "transcribing", "cleaning", "summarizing", "validating", "completed"];
+const ARTICLE_STAGE_ORDER = ["parsing", "cleaning", "summarizing", "validating", "completed"];
 const STAGE_LABELS: Record<string, string> = {
-  parsing: "解析视频", checking_subtitles: "检查字幕", downloading: "下载音频", loading_model: "加载模型",
-  transcribing: "本地转录", cleaning: "整理文字", summarizing: "生成总结", validating: "校验证据", completed: "处理完成",
+  parsing: "解析内容", checking_subtitles: "检查字幕", downloading: "下载音频", loading_model: "加载模型",
+  transcribing: "本地转录", cleaning: "整理原文", summarizing: "生成总结", validating: "校验证据", completed: "处理完成",
 };
 const TERMINAL = new Set(["completed", "partial", "failed", "cancelled"]);
 const DEFAULT_SETTINGS: Settings = { model: "small", language: "auto", summaryMode: "auto", autoExpandPlayer: true };
@@ -138,8 +143,49 @@ function progressDetail(task: Task) {
   if (typeof detail.validated_chunks === "number") {
     return `已校验 ${detail.validated_chunks} 个分块${detail.failed_chunks ? `，${detail.failed_chunks} 个未完成` : ""}`;
   }
-  if (typeof detail.segments === "number") return `已保存 ${detail.segments} 个时间段`;
+  if (typeof detail.segments === "number") return task.content_type === "article" ? `已保存 ${detail.segments} 个正文段落` : `已保存 ${detail.segments} 个时间段`;
   return "阶段进度按实际处理量更新";
+}
+
+function articleBlockKind(segment: TranscriptSegment): ArticleBlockKind {
+  if (segment.kind) return segment.kind;
+  const text = segment.text.trim();
+  if (/^【图片说明】/.test(text)) return "caption";
+  if (text.length <= 60 && (/^\d+(?:\.\d+)*[.、．]\s*\S+/.test(text) || /^[一二三四五六七八九十]+[、.．]\s*\S+/.test(text))) return "heading";
+  return "paragraph";
+}
+
+function articleBlockKinds(segments: TranscriptSegment[]): ArticleBlockKind[] {
+  let highestLegacyHeading = 0;
+  return segments.map(segment => {
+    if (segment.kind) return segment.kind;
+    const kind = articleBlockKind(segment);
+    if (kind !== "heading") return kind;
+    const number = Number(segment.text.trim().match(/^(\d+)/)?.[1] || 0);
+    if (!number || number >= highestLegacyHeading) {
+      highestLegacyHeading = Math.max(highestLegacyHeading, number);
+      return "heading";
+    }
+    return "paragraph";
+  });
+}
+
+function articleOutlineFromSegments(segments: TranscriptSegment[]) {
+  const kinds = articleBlockKinds(segments);
+  const headingIndexes = segments.map((_, index) => index).filter(index => kinds[index] === "heading");
+  return headingIndexes.map((start, headingIndex) => {
+    const end = headingIndexes[headingIndex + 1] ?? segments.length;
+    const content = segments.slice(start + 1, end)
+      .filter((_, offset) => ["paragraph", "list_item", "quote"].includes(kinds[start + 1 + offset]))
+      .map(segment => segment.text.trim())
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 150);
+    return {
+      title: segments[start].text.replace(/^\d+(?:\.\d+)*[.、．]\s*/, ""),
+      content: content || "查看该章节的完整原文。",
+    };
+  });
 }
 
 export default function Home() {
@@ -263,7 +309,7 @@ export default function Home() {
         body: JSON.stringify({ url: url.trim(), model, language: settings.language, summary_mode: settings.summaryMode }),
       });
       const created = await response.json();
-      if (!response.ok) throw new Error(created.error || "无法创建转录任务");
+      if (!response.ok) throw new Error(created.error || "无法创建处理任务");
       setTask(created); pollJob(created.job_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "无法连接留文本地服务");
@@ -306,7 +352,7 @@ export default function Home() {
     confirmFirstUse();
     setPreflightOpen(false);
     setView("settings");
-    setApiMessage("可在这里配置总结 API；保存后回到首页开始转录。");
+    setApiMessage("可在这里配置总结 API；保存后回到首页开始处理。");
   }
 
   async function copyCurrent() {
@@ -455,11 +501,14 @@ export default function Home() {
   const downloadUrl = result ? `${API}/api/download/${active}?job_id=${encodeURIComponent(result.job_id)}` : "#";
   const visibleHistory = history.filter(item => {
     const matchesStatus = historyFilter === "all" || item.status === historyFilter;
-    const haystack = `${item.title || ""} ${item.author || ""} ${item.bvid || ""} ${(item.result as Result | undefined)?.source_url || ""}`.toLowerCase();
+    const haystack = `${item.title || ""} ${item.author || ""} ${item.bvid || ""} ${item.article_id || ""} ${(item.result as Result | undefined)?.source_url || item.source_url || ""}`.toLowerCase();
     return matchesStatus && haystack.includes(historyQuery.trim().toLowerCase());
   });
+  const resultIsArticle = result?.content_type === "article" || Boolean(result?.article_id);
+  const taskIsArticle = task?.content_type === "article" || Boolean(task?.article_id);
+  const stageOrder = taskIsArticle ? ARTICLE_STAGE_ORDER : VIDEO_STAGE_ORDER;
   const resultClaims: Claim[] = result?.claims?.length ? result.claims : (result?.key_points || []).map((point, index) => ({ claim: point, evidence: result?.evidence?.[index] || point, kind: result?.summary_type === "extractive" ? "原文摘录" : "作者观点", start: null, end: null }));
-  const resultVideo: BilibiliVideoInfo | null = result?.video || (result?.bvid ? {
+  const resultVideo: BilibiliVideoInfo | null = resultIsArticle ? null : result?.video || (result?.bvid ? {
     platform: "bilibili",
     bvid: result.bvid,
     page: result.page || 1,
@@ -489,12 +538,12 @@ export default function Home() {
         <h1 className="homeSlogan" aria-label={BRAND_COPY.slogan}><span aria-hidden="true">{BRAND_SLOGAN_LEAD}，</span><em aria-hidden="true">{BRAND_SLOGAN_END}</em></h1>
         <p className="lead">粘贴链接，顷刻成文。</p>
         <form className="urlBox quietBox" onSubmit={submit}>
-          <label htmlFor="video-url">B 站视频链接或完整分享文案</label>
+          <label htmlFor="video-url">B 站视频、文章链接或完整分享文案</label>
           <div className="inputRow">
-            <input id="video-url" value={url} onChange={e => setUrl(e.target.value)} placeholder="粘贴 B 站视频链接或完整分享文案" autoComplete="off" />
-            <button disabled={!url.trim()} type="submit">开始转录<Icon name="arrow-right" size={18} /></button>
+            <input id="video-url" value={url} onChange={e => setUrl(e.target.value)} placeholder="粘贴 B 站视频、文章链接或完整分享文案" autoComplete="off" />
+            <button disabled={!url.trim()} type="submit">开始处理<Icon name="arrow-right" size={18} /></button>
           </div>
-          <div className="inputFoot"><button type="button" onClick={() => setUrl(EXAMPLE)}>填入示例</button><span>音频与转录默认在本机处理</span></div>
+          <div className="inputFoot"><button type="button" onClick={() => setUrl(EXAMPLE)}>填入示例</button><span>视频转录与文章正文默认在本机处理</span></div>
         </form>
         {error && <ErrorCard message={error} onRetry={() => setError("")} />}
       </section>}
@@ -502,33 +551,43 @@ export default function Home() {
       {processing && task && <section className="taskPage">
         <div className="taskTop"><button className="back" onClick={() => { setTask(null); setError(""); }}><Icon name="arrow-left" size={15} />返回首页</button><div className="taskTopActions"><span className="jobTag">任务 {task.job_id.slice(0, 8)}</span><button className="cancelButton" onClick={cancelTask}>取消任务</button></div></div>
         <div className="taskIntro">
-          <div><span className="kicker">PROCESSING / 正在处理</span><h2>{task.title || "正在读取视频信息…"}</h2><p>{task.message}</p></div>
+          <div><span className="kicker">PROCESSING / 正在处理</span><h2>{task.title || "正在读取内容信息…"}</h2><p>{task.message}</p></div>
           <div className="progressNumber">{task.progress}<small>%</small></div>
         </div>
         <div className="progressTrack"><i style={{ width: `${task.progress}%` }} /></div>
         <div className="stageList">
-          {STAGE_ORDER.map((stage, index) => {
-            const currentIndex = STAGE_ORDER.indexOf(task.stage);
+          {stageOrder.map((stage, index) => {
+            const currentIndex = stageOrder.indexOf(task.stage);
             const state = index < currentIndex ? "done" : index === currentIndex ? "active" : "pending";
             return <div className={`stage ${state}`} key={stage}><span>{state === "done" ? <Icon name="check" size={14} /> : String(index + 1).padStart(2, "0")}</span><p>{STAGE_LABELS[stage]}</p></div>;
           })}
         </div>
-        <div className="taskMeta"><span>已耗时 {formatTime(elapsed)}</span><span>Whisper {task.model} · {task.language || "auto"} · CPU INT8</span><span>总结：{task.summary_mode === "local" ? "本地" : "API / 自动"}</span><span>{progressDetail(task)}</span><span>已完成阶段会立即保存</span></div>
+        <div className="taskMeta"><span>已耗时 {formatTime(elapsed)}</span><span>{taskIsArticle ? "B 站文章正文 · 无需语音转录" : `Whisper ${task.model} · ${task.language || "auto"} · CPU INT8`}</span><span>总结：{task.summary_mode === "local" ? "本地" : "API / 自动"}</span><span>{progressDetail(task)}</span><span>已完成阶段会立即保存</span></div>
       </section>}
 
       {(task?.status === "failed" || task?.status === "cancelled") && !result && <section className="taskPage">
         <div className="taskTop"><button className="back" onClick={() => { setTask(null); setError(""); }}><Icon name="arrow-left" size={15} />返回首页</button></div>
         <ErrorCard message={error || task.message} info={task.error_info} onRetry={() => retryTask("auto")} />
-        <div className="recoveryActions"><button onClick={() => retryTask("auto")}>从可用阶段重试</button><button onClick={() => retryTask("transcription")}>重新转录</button><a href={`${API}/api/download/diagnostics?job_id=${task.job_id}`}>下载脱敏诊断</a></div>
+        <div className="recoveryActions"><button onClick={() => retryTask("auto")}>从可用阶段重试</button><button onClick={() => retryTask("transcription")}>重新处理原文</button><a href={`${API}/api/download/diagnostics?job_id=${task.job_id}`}>下载脱敏诊断</a></div>
       </section>}
 
-      {result && <section className="workbench" aria-live="polite">
-        <div className="taskTop"><button className="back" onClick={() => { setResult(null); setTask(null); setUrl(""); }}><Icon name="arrow-left" size={15} />新建转录</button><span className={`successPill ${task?.status === "partial" ? "partial" : ""}`}>{task?.status === "partial" ? "部分完成" : "处理完成"}</span></div>
-        <div className="resultHead">
-          <div className="coverFrame">{result.cover ? <img src={`${API}/api/cover?url=${encodeURIComponent(result.cover)}`} alt={`${result.title} 视频封面`} /> : <span>留文</span>}</div>
-          <div className="resultTitle"><span className="kicker">RESULT / 内容结果</span><h2>{result.title}</h2><p>{result.author} · {formatTime(result.duration)} · {result.method}</p></div>
-        </div>
-        <div className="resultPlayer">
+      {result && <section className={`workbench ${resultIsArticle ? "articleWorkbench" : ""}`} aria-live="polite">
+        <div className="taskTop"><button className="back" onClick={() => { setResult(null); setTask(null); setUrl(""); }}><Icon name="arrow-left" size={15} />新建任务</button><span className={`successPill ${task?.status === "partial" ? "partial" : ""}`}>{task?.status === "partial" ? "部分完成" : "处理完成"}</span></div>
+        {resultIsArticle ? <header className="articleResultHero">
+          <div className="articleResultEyebrow"><span>BILIBILI ARTICLE / 文章留存</span><small>文章号 {result.article_id || "未知"}</small></div>
+          <h1>{result.title}</h1>
+          <p>由 {result.author} 发布 · 已提取为可检索、可总结的本地文章</p>
+          <div className="articleHeroMeta">
+            <div><small>正文规模</small><strong>{result.transcript.length.toLocaleString()} 字</strong></div>
+            <div><small>内容结构</small><strong>{result.segments?.length || 0} 个段落</strong></div>
+            <div><small>整理方式</small><strong>{result.summary_type === "generative" ? "AI 语义导读" : "本地原文摘录"}</strong></div>
+            <a href={result.source_url} target="_blank" rel="noreferrer">打开 B 站原文 <Icon name="arrow-right" size={15} /></a>
+          </div>
+        </header> : <div className="resultHead">
+          <div className="coverFrame">{result.cover ? <img src={`${API}/api/cover?url=${encodeURIComponent(result.cover)}`} alt={`${result.title}${resultIsArticle ? "文章配图" : "视频封面"}`} /> : <span>留文</span>}</div>
+          <div className="resultTitle"><span className="kicker">RESULT / 内容结果</span><h2>{result.title}</h2><p>{result.author} · {resultIsArticle ? `${result.transcript.length.toLocaleString()} 字` : formatTime(result.duration)} · {result.method}</p></div>
+        </div>}
+        {resultVideo ? <div className="resultPlayer">
           <FloatingBilibiliPlayer
             key={result.job_id}
             ref={floatingPlayerRef}
@@ -541,44 +600,53 @@ export default function Home() {
             autoExpand={settings.autoExpandPlayer}
             side={active === "transcript" ? "right" : "left"}
           />
+        </div> : null}
+        <div className={`toolbar ${resultIsArticle ? "articleToolbar" : ""}`}>
+          <div className="tabs" role="tablist"><button className={active === "summary" ? "active" : ""} onClick={() => setActive("summary")}>{resultIsArticle ? "摘要导读" : "内容总结"}</button><button className={active === "transcript" ? "active" : ""} onClick={() => setActive("transcript")}>{resultIsArticle ? "阅读原文" : "完整转录"}</button></div>
+          <div className="actions">{!resultIsArticle && <label className="autoFloatToggle" title="控制新打开任务首次下滑时是否默认展开悬浮播放器"><input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} /><span>默认弹出视频</span></label>}<button className="copy" onClick={copyCurrent}>{copied ? "已复制" : "复制"}</button><a className="download" href={downloadUrl}>下载 Markdown</a><a className="copy" href={`${API}/api/download/diagnostics?job_id=${result.job_id}`}>诊断</a></div>
         </div>
-        <div className="toolbar">
-          <div className="tabs" role="tablist"><button className={active === "summary" ? "active" : ""} onClick={() => setActive("summary")}>内容总结</button><button className={active === "transcript" ? "active" : ""} onClick={() => setActive("transcript")}>完整转录</button></div>
-          <div className="actions"><label className="autoFloatToggle" title="控制新打开任务首次下滑时是否默认展开悬浮播放器"><input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} /><span>默认弹出视频</span></label><button className="copy" onClick={copyCurrent}>{copied ? "已复制" : "复制"}</button><a className="download" href={downloadUrl}>下载 Markdown</a><a className="copy" href={`${API}/api/download/diagnostics?job_id=${result.job_id}`}>诊断</a></div>
-        </div>
-        {active === "summary" ? <div className="summaryPage">
+        {active === "summary" ? resultIsArticle ? <ArticleSummary
+          result={result}
+          claims={resultClaims}
+          task={task}
+          error={error}
+          cloudAvailable={cloudAvailable}
+          resummarizing={resummarizing}
+          onResummarize={() => resummarize("cloud")}
+          onDismissError={() => setError("")}
+        /> : <div className="summaryPage">
           <div className={`summaryNotice ${result.summary_type || "extractive"}`}>
             <div><strong>{result.summary_type === "generative" ? "AI 语义总结" : "本地原文摘录"}</strong>
             <span>{result.summary_type === "generative" ? "已校验原文引句；重要结论仍建议回看核对。" : "当前不是语义总结，只是算法挑选的原句，因此可能抓错重点。"}</span></div>
             {result.summary_type === "generative" ? <button disabled={resummarizing} onClick={() => resummarize("cloud")}>{resummarizing ? "正在重新总结…" : "重新生成"}</button> : <button disabled={resummarizing} onClick={() => resummarize("cloud")}>{resummarizing ? "正在总结…" : cloudAvailable ? "使用 API 重新总结" : "配置 API 后重新总结"}</button>}
           </div>
-          {(task?.status === "partial" || result.summary_error) && <div className="partialNotice"><div><strong>逐字稿已安全保存</strong><span>{result.summary_error?.message || task?.warning?.message || "部分总结未完成，可单独重试。"}</span></div><button onClick={() => resummarize("cloud")}>只重新总结</button></div>}
+          {(task?.status === "partial" || result.summary_error) && <div className="partialNotice"><div><strong>{resultIsArticle ? "文章原文已安全保存" : "逐字稿已安全保存"}</strong><span>{result.summary_error?.message || task?.warning?.message || "部分总结未完成，可单独重试。"}</span></div><button onClick={() => resummarize("cloud")}>只重新总结</button></div>}
           {error && <ErrorCard message={error} onRetry={() => setError("")} />}
           <article className="summaryLead"><span className="sectionNo">01</span><div><h3>{result.summary_type === "generative" ? "一句话结论" : "最重要的原文表达"}</h3><p>{result.summary}</p></div></article>
           <article className="summarySection"><div className="summarySectionHead"><span className="sectionNo">02</span><h3>{result.summary_type === "generative" ? "有原文支撑的核心观点" : "算法筛选的重点原句"}</h3></div><ol className="claimList">{resultClaims.map((item, index) => <li key={index}>
             <div className="claimHead"><span>{String(index + 1).padStart(2, "0")}</span><small>{item.kind}</small>{item.verified === false && <small className="unverified">旧数据未校验</small>}</div>
             <p className="claimText">{item.claim}</p>
             <blockquote>{item.evidence}</blockquote>
-            <div className="claimActions">{claimTimestamp(item) != null ? <button type="button" onClick={() => handleTimestampClick(claimTimestamp(item))} aria-label={`定位播放 ${formatTimestamp(claimTimestamp(item))}`}><Icon name="play" size={13} />{formatTimestamp(claimTimestamp(item))}–{formatTimestamp(item.end)} 定位播放</button> : <span>旧任务无时间戳</span>}{item.context && <details><summary>展开上下文</summary><p>{item.context}</p></details>}</div>
+            <div className="claimActions">{claimTimestamp(item) != null ? <button type="button" onClick={() => handleTimestampClick(claimTimestamp(item))} aria-label={`定位播放 ${formatTimestamp(claimTimestamp(item))}`}><Icon name="play" size={13} />{formatTimestamp(claimTimestamp(item))}–{formatTimestamp(item.end)} 定位播放</button> : resultIsArticle ? <a href={result.source_url} target="_blank" rel="noreferrer">查看文章原文 ↗</a> : <span>旧任务无时间戳</span>}{item.context && <details><summary>展开上下文</summary><p>{item.context}</p></details>}</div>
           </li>)}</ol></article>
           {!!result.outline?.length && <article className="summarySection"><div className="summarySectionHead"><span className="sectionNo">03</span><h3>内容脉络</h3></div><div className="outlineGrid">{result.outline.map((item, index) => <div key={index}><small>{item.title}</small><p>{item.content}</p></div>)}</div></article>}
-        </div> : <article className="transcriptPaper"><div className="paperMeta"><span>带时间戳逐字稿</span><span>{result.transcript.length.toLocaleString()} 字 · {result.segments?.length || 0} 段</span></div>{result.segments?.length ? <div className="segmentList">{result.segments.map((segment, index) => <div className="segmentRow" key={index}>{segment.start != null ? <button type="button" onClick={() => handleTimestampClick(segment.start)} aria-label={`定位播放 ${formatTimestamp(segment.start)}`}>{formatTimestamp(segment.start)}</button> : <span>--:--</span>}<p>{segment.text}</p></div>)}</div> : <div className="transcriptText">{result.transcript}</div>}</article>}
+        </div> : resultIsArticle ? <ArticleOriginal result={result} /> : <article className="transcriptPaper"><div className="paperMeta"><span>带时间戳逐字稿</span><span>{result.transcript.length.toLocaleString()} 字 · {result.segments?.length || 0} 段</span></div>{result.segments?.length ? <div className="segmentList">{result.segments.map((segment, index) => <div className="segmentRow" key={index}>{segment.start != null ? <button type="button" onClick={() => handleTimestampClick(segment.start)} aria-label={`定位播放 ${formatTimestamp(segment.start)}`}>{formatTimestamp(segment.start)}</button> : <span>--:--</span>}<p>{segment.text}</p></div>)}</div> : <div className="transcriptText">{result.transcript}</div>}</article>}
       </section>}
     </>}
 
     {view === "history" && <section className="panelPage">
       <div className="pageHeading"><span className="kicker">LOCAL ARCHIVE / 本地记录</span><h1>最近任务</h1><p>结果保存在这台电脑上。你可以随时打开或删除。</p></div>
-      <div className="historyTools"><input value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} placeholder="搜索标题、作者或 BV 号" /><select value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">全部状态</option><option value="completed">已完成</option><option value="processing">处理中</option><option value="partial">部分完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div>
+      <div className="historyTools"><input value={historyQuery} onChange={event => setHistoryQuery(event.target.value)} placeholder="搜索标题、作者、BV 号或文章号" /><select value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">全部状态</option><option value="completed">已完成</option><option value="processing">处理中</option><option value="partial">部分完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div>
       {visibleHistory.length ? <div className="historyList">{visibleHistory.map(item => <article key={item.job_id}>
         <button className="historyMain" onClick={() => openTask(item.job_id)}>
-          <span className={`statusDot ${item.status}`} /><span className="historyText"><strong>{item.title || "未命名任务"}</strong><small>{formatDate(item.created_at)} · {item.model} · {STATUS_LABELS[item.status] || item.status}{!TERMINAL.has(item.status) ? ` · ${item.progress}%` : ""}</small></span><Icon name="arrow-right" size={15} />
+          <span className={`statusDot ${item.status}`} /><span className="historyText"><strong>{item.title || "未命名任务"}</strong><small>{formatDate(item.created_at)} · {item.content_type === "article" ? "B 站文章" : item.model} · {STATUS_LABELS[item.status] || item.status}{!TERMINAL.has(item.status) ? ` · ${item.progress}%` : ""}</small></span><Icon name="arrow-right" size={15} />
         </button><button className="deleteButton" onClick={() => deleteTask(item.job_id)} aria-label={`删除 ${item.title || "任务"}`}>删除</button>
-      </article>)}</div> : <div className="emptyState"><b>还没有转录内容。</b><p>粘贴一个视频链接开始使用留文。</p><button onClick={() => setView("home")}>开始第一次转录</button></div>}
+      </article>)}</div> : <div className="emptyState"><b>还没有处理过内容。</b><p>粘贴一个 B 站视频或文章链接开始使用留文。</p><button onClick={() => setView("home")}>开始第一个任务</button></div>}
     </section>}
 
     {view === "settings" && <section className="panelPage settingsPage">
       <div className="pageHeading"><span className="kicker">PREFERENCES / 设置</span><h1>处理方式</h1><p>选择速度、准确度与隐私之间的平衡。</p></div>
-      <div className="settingGroup"><div><h2>转录模型</h2><p>更大的模型通常更准确，也需要更多时间和内存。</p></div><div className="choiceList">
+      <div className="settingGroup"><div><h2>视频转录模型</h2><p>仅用于视频；文章会直接读取正文并跳过 Whisper。更大的模型通常更准确，也需要更多时间和内存。</p></div><div className="choiceList">
         {([['large-v3-turbo','Large v3 Turbo','推荐 · 中英文准确度更高'],['medium','Medium','平衡准确度与处理速度'],['small','Small','速度优先 · 英文和专业词准确度较低']] as const).map(([value,title,desc]) => <label key={value} className={settings.model === value ? "selected" : ""}><input type="radio" name="model" checked={settings.model === value} onChange={() => saveSettings({...settings, model:value})}/><span><strong>{title}</strong><small>{desc}</small></span></label>)}
       </div></div>
       <div className="settingGroup"><div><h2>音频语言</h2><p>自动检测适合中英文视频；明确指定语言可减少误判。</p></div><div className="choiceList">
@@ -588,7 +656,7 @@ export default function Home() {
         <input type="checkbox" checked={settings.autoExpandPlayer} onChange={event => saveSettings({...settings, autoExpandPlayer:event.target.checked})} />
         <span><strong>默认弹出悬浮窗</strong><small>{settings.autoExpandPlayer ? "已开启：新任务首次下滑默认展开；切换开关会同步更新当前任务。" : "已关闭：新任务和当前任务下一次下滑默认显示按钮；主动展开后仍会记住新状态。"}</small></span>
       </label></div>
-      <div className="settingGroup"><div><h2>总结服务</h2><p>云端总结会将逐字稿发送至你配置的服务。</p></div><div className="choiceList">
+      <div className="settingGroup"><div><h2>总结服务</h2><p>云端总结会将视频逐字稿或文章正文发送至你配置的服务。</p></div><div className="choiceList">
         {([['auto','自动选择',cloudAvailable ? '优先使用 API，失败时退回原文摘录' : '未配置 API，当前只会生成原文摘录'],['local','始终本地','不发送文字；仅提取关键原句，不理解语义'],['cloud','仅 API 语义总结',cloudAvailable ? '使用下方已配置的总结服务' : '请先在下方填写并保存 API 配置']] as const).map(([value,title,desc]) => <label key={value} className={settings.summaryMode === value ? "selected" : ""}><input type="radio" name="summary" checked={settings.summaryMode === value} onChange={() => saveSettings({...settings, summaryMode:value})}/><span><strong>{title}</strong><small>{desc}</small></span></label>)}
       </div></div>
       <div className="settingGroup apiSetting"><div><h2>总结 API</h2><p>配置后，新任务会生成语义总结；历史任务也可直接重新总结，无需再次转录。</p></div><div className="apiForm">
@@ -603,7 +671,7 @@ export default function Home() {
         <small className="apiHelp">{apiConfig.provider === "gemini" && <><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">打开 Google AI Studio 获取 Key ↗</a> · <a href="https://ai.google.dev/gemini-api/docs/openai" target="_blank" rel="noreferrer">Gemini OpenAI 兼容文档 ↗</a><br />官方兼容接口支持模型列表，保存 Key 后可点击“读取可用模型”；私有代理不支持时再到高级设置手动填写。</>}{apiConfig.provider === "sensenova" && <><a href="https://platform.sensenova.cn/console/keys" target="_blank" rel="noreferrer">打开 SenseNova 控制台获取 API Key ↗</a> · <a href="https://www.sensecore.cn/help/docs/model-as-service/nova/overview/compatible-mode" target="_blank" rel="noreferrer">兼容接口文档 ↗</a><br />首次连接会自动读取并验证模型；发现模型后，选择模型只验证当前选择，不会静默切换。</>}{apiConfig.provider === "compatible" && <>如果服务支持标准 <code>/models</code>，留文会自动读取；本地 Ollama 使用 <code>/api/tags</code>；不支持时只需在高级设置中填写模型 ID。</>}{apiConfig.provider === "openai" && <>OpenAI 支持标准模型列表，保存 Key 后可点击“读取可用模型”自动选择。</>}</small>
         <p className="securityWarning">密钥优先使用 Windows 当前用户加密保存；请勿提交或分享 data/config.json、data/credentials.json 或诊断文件。旧版明文配置会在下一次主动保存时迁移。</p>
       </div></div>
-      <div className="privacyNote"><span>本地优先</span><p>视频音频、Whisper 转录和历史任务默认留在这台电脑上。只有主动使用云端总结时，逐字稿才会发送到配置的服务。</p></div>
+      <div className="privacyNote"><span>本地优先</span><p>视频音频、Whisper 转录、文章正文和历史任务默认留在这台电脑上。只有主动使用云端总结时，原文才会发送到配置的服务。</p></div>
     </section>}
 
     {preflightOpen && <div className="dialogBackdrop" role="presentation" onMouseDown={event => {
@@ -611,19 +679,19 @@ export default function Home() {
     }}>
       <section className="transcriptionDialog" role="dialog" aria-modal="true" aria-labelledby="transcription-dialog-title">
         <div className="dialogHead">
-          <div><span className="kicker">{firstUseConfirmed ? "TRANSCRIPTION MODEL" : "FIRST USE"}</span><h2 id="transcription-dialog-title">{firstUseConfirmed ? "这次使用哪个转录模型？" : "开始前，先完成首次使用确认"}</h2></div>
+          <div><span className="kicker">{firstUseConfirmed ? "PROCESSING OPTIONS" : "FIRST USE"}</span><h2 id="transcription-dialog-title">{firstUseConfirmed ? "选择本次处理设置" : "开始前，先完成首次使用确认"}</h2></div>
           <button type="button" onClick={() => setPreflightOpen(false)} aria-label="关闭"><Icon name="close" size={18} /></button>
         </div>
 
         {!firstUseConfirmed && <div className="usageLimits">
           <h3>关键使用限制</h3>
-          <label><input type="checkbox" checked={usageChecks.rights} onChange={event => setUsageChecks({...usageChecks, rights: event.target.checked})} /><span><strong>内容权限</strong>我确认有权处理该视频，并会遵守平台规则、版权和适用法律。</span></label>
-          <label><input type="checkbox" checked={usageChecks.accuracy} onChange={event => setUsageChecks({...usageChecks, accuracy: event.target.checked})} /><span><strong>结果核对</strong>我理解自动转录和总结可能出错，重要信息会回看原视频核对。</span></label>
-          <label><input type="checkbox" checked={usageChecks.resources} onChange={event => setUsageChecks({...usageChecks, resources: event.target.checked})} /><span><strong>本机资源与隐私</strong>首次使用会下载模型并占用网络、磁盘和 CPU；启用云端总结后，逐字稿会发送给所选 API 服务。</span></label>
+          <label><input type="checkbox" checked={usageChecks.rights} onChange={event => setUsageChecks({...usageChecks, rights: event.target.checked})} /><span><strong>内容权限</strong>我确认有权处理该视频或文章，并会遵守平台规则、版权和适用法律。</span></label>
+          <label><input type="checkbox" checked={usageChecks.accuracy} onChange={event => setUsageChecks({...usageChecks, accuracy: event.target.checked})} /><span><strong>结果核对</strong>我理解自动提取、转录和总结可能出错，重要信息会返回 B 站原内容核对。</span></label>
+          <label><input type="checkbox" checked={usageChecks.resources} onChange={event => setUsageChecks({...usageChecks, resources: event.target.checked})} /><span><strong>本机资源与隐私</strong>视频首次转录会下载模型并占用网络、磁盘和 CPU；文章会跳过模型下载。启用云端总结后，原文会发送给所选 API 服务。</span></label>
         </div>}
 
         <div className="modelPicker">
-          <h3>选择本次转录模型</h3>
+          <h3>视频转录模型 <small>文章会自动跳过</small></h3>
           <div className="modelPickerList">{TRANSCRIPTION_MODELS.map(model => <label key={model.value} className={selectedModel === model.value ? "selected" : ""}>
             <input type="radio" name="preflight-model" checked={selectedModel === model.value} onChange={() => setSelectedModel(model.value)} />
             <span><strong>{model.title}<small>{model.badge}</small></strong><em>{model.description}</em></span>
@@ -639,13 +707,78 @@ export default function Home() {
 
         <div className="dialogActions">
           <button type="button" onClick={() => setPreflightOpen(false)}>取消</button>
-          <button type="button" className="primary" onClick={confirmTranscription} disabled={!firstUseConfirmed && (!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources || !apiDecision)}>使用 {TRANSCRIPTION_MODELS.find(model => model.value === selectedModel)?.title} 开始转录</button>
+          <button type="button" className="primary" onClick={confirmTranscription} disabled={!firstUseConfirmed && (!usageChecks.rights || !usageChecks.accuracy || !usageChecks.resources || !apiDecision)}>使用 {TRANSCRIPTION_MODELS.find(model => model.value === selectedModel)?.title} 开始处理</button>
         </div>
       </section>
     </div>}
 
     <footer><span>留文 · WENL SCRIBE</span><span>本地优先，结果清晰，内容属于用户。</span><span>A WENL PROJECT</span></footer>
   </main>;
+}
+
+function ArticleSummary({ result, claims, task, error, cloudAvailable, resummarizing, onResummarize, onDismissError }: {
+  result: Result;
+  claims: Claim[];
+  task: Task | null;
+  error: string;
+  cloudAvailable: boolean;
+  resummarizing: boolean;
+  onResummarize: () => void;
+  onDismissError: () => void;
+}) {
+  const isGenerative = result.summary_type === "generative";
+  const outline = result.outline?.length ? result.outline : articleOutlineFromSegments(result.segments || []);
+  return <div className="articleSummaryPage">
+    <div className={`articleSummaryStatus ${result.summary_type || "extractive"}`}>
+      <div><span>{isGenerative ? "AI 导读" : "本地摘录"}</span><p>{isGenerative ? "观点均已匹配文章原句，适合先读导览再深入原文。" : "当前按原句提取重点；配置 API 后可生成语义导读。"}</p></div>
+      <button disabled={resummarizing} onClick={onResummarize}>{resummarizing ? "正在生成…" : isGenerative ? "重新生成导读" : cloudAvailable ? "生成 AI 导读" : "配置 API 后生成"}</button>
+    </div>
+    {(task?.status === "partial" || result.summary_error) && <div className="partialNotice"><div><strong>文章原文已安全保存</strong><span>{result.summary_error?.message || task?.warning?.message || "部分总结未完成，可单独重试。"}</span></div><button onClick={onResummarize}>只重新总结</button></div>}
+    {error && <ErrorCard message={error} onRetry={onDismissError} />}
+    <section className="articleDigest">
+      <div className="articleSectionLabel"><span>READING GUIDE</span><strong>文章导读</strong></div>
+      <p>{result.summary}</p>
+    </section>
+    {!!outline.length && <section className="articleOutlineSection">
+      <div className="articleSectionHeading"><div><span>STRUCTURE</span><h2>文章脉络</h2></div><p>沿着作者原有的论述顺序快速浏览。</p></div>
+      <ol>{outline.map((item, index) => <li key={index}><span>{String(index + 1).padStart(2, "0")}</span><div><h3>{item.title}</h3><p>{item.content}</p></div></li>)}</ol>
+    </section>}
+    <section className="articleClaimsSection">
+      <div className="articleSectionHeading"><div><span>KEY IDEAS</span><h2>核心观点</h2></div><p>{claims.length} 条观点，每条都保留可展开的原文依据。</p></div>
+      <div className="articleClaimGrid">{claims.map((item, index) => <article key={index}>
+        <header><span>{item.kind}</span><b>{String(index + 1).padStart(2, "0")}</b></header>
+        <h3>{item.claim}</h3>
+        <details>
+          <summary>查看原文依据</summary>
+          <blockquote>{item.evidence}</blockquote>
+          {item.context && <p>{item.context}</p>}
+          <a href={result.source_url} target="_blank" rel="noreferrer">到 B 站原文核对 ↗</a>
+        </details>
+      </article>)}</div>
+    </section>
+  </div>;
+}
+
+function ArticleOriginal({ result }: { result: Result }) {
+  const segments = result.segments?.length ? result.segments : result.transcript.split(/\n+/).filter(Boolean).map(text => ({ start: null, end: null, text, kind: "paragraph" as const }));
+  const blockKinds = articleBlockKinds(segments);
+  const headings = segments.map((segment, index) => ({ segment, index, kind: blockKinds[index] })).filter(item => item.kind === "heading");
+  return <article className="articleReadingPage">
+    <header className="articleReadingHead"><div><span>ORIGINAL TEXT</span><strong>文章原文</strong></div><p>{result.transcript.length.toLocaleString()} 字 · {segments.length} 个段落</p></header>
+    <div className={`articleReadingGrid ${headings.length ? "withToc" : ""}`}>
+      {headings.length > 0 && <aside className="articleToc" aria-label="文章目录"><span>CONTENTS</span><strong>本文目录</strong><ol>{headings.map(({segment, index}, headingIndex) => <li key={index}><a href={`#article-section-${index}`}><small>{String(headingIndex + 1).padStart(2, "0")}</small>{segment.text}</a></li>)}</ol></aside>}
+      <div className="articleBody">{segments.map((segment, index) => {
+        const kind = blockKinds[index];
+        if (kind === "heading") return <h2 id={`article-section-${index}`} key={index}><span>{String(headings.findIndex(item => item.index === index) + 1).padStart(2, "0")}</span>{segment.text}</h2>;
+        if (kind === "quote") return <blockquote key={index}>{segment.text}</blockquote>;
+        if (kind === "code") return <pre key={index}><code>{segment.text}</code></pre>;
+        if (kind === "caption") return <p className="articleCaption" key={index}>图注｜{segment.text.replace(/^【图片说明】/, "")}</p>;
+        if (kind === "list_item") return <div className="articleListItem" key={index}><span>•</span><p>{segment.text}</p></div>;
+        return <p key={index}>{segment.text}</p>;
+      })}</div>
+    </div>
+    <footer className="articleReadingFoot"><span>原文来自哔哩哔哩，留文仅做本地提取与排版。</span><a href={result.source_url} target="_blank" rel="noreferrer">查看最新原文 ↗</a></footer>
+  </article>;
 }
 
 function ErrorCard({ message, info, onRetry }: { message: string; info?: ErrorInfo; onRetry: () => void }) {

@@ -37,6 +37,15 @@ test("keeps v0.4 evidence, recovery, and export controls in the UI", async () =>
   assert.match(page, /result\.segments\.map/);
   assert.match(page, /item\.evidence/);
   assert.match(page, /<FloatingBilibiliPlayer/);
+  assert.match(page, /resultVideo \? <div className="resultPlayer">/);
+  assert.match(page, /B 站视频、文章链接或完整分享文案/);
+  assert.match(page, /摘要导读/);
+  assert.match(page, /阅读原文/);
+  assert.match(page, /ArticleSummary/);
+  assert.match(page, /ArticleOriginal/);
+  assert.match(page, /articleOutlineFromSegments/);
+  assert.match(page, /打开 B 站原文/);
+  assert.match(page, /ARTICLE_STAGE_ORDER/);
   assert.match(page, /handleTimestampClick\(claimTimestamp\(item\)\)/);
   assert.match(page, /handleTimestampClick\(segment\.start\)/);
   assert.match(page, /API_PROVIDER_OPTIONS/);
@@ -58,6 +67,10 @@ test("keeps v0.4 evidence, recovery, and export controls in the UI", async () =>
   assert.match(css, /\.floatingVideoShell\.isFloatingExpanded/);
   assert.match(css, /\.floatingVideoBar/);
   assert.match(css, /\.floatingVideoLauncher/);
+  assert.match(css, /\.articleResultHero/);
+  assert.match(css, /\.articleClaimGrid/);
+  assert.match(css, /\.articleReadingGrid/);
+  assert.match(css, /\.articleToc/);
 });
 
 test("backend persists staged artifacts and exposes recovery endpoints", async () => {
@@ -93,6 +106,9 @@ test("backend persists staged artifacts and exposes recovery endpoints", async (
   assert.match(backend, /\/api\/config\/models/);
   assert.match(backend, /"platform": "bilibili"/);
   assert.match(backend, /def resolve_page/);
+  assert.match(backend, /def resolve_bilibili_link/);
+  assert.match(backend, /def parse_bilibili_article/);
+  assert.match(backend, /"content_type": "article"/);
 });
 
 test("v0.5 player keeps fixed Bilibili origins and CSP", async () => {
