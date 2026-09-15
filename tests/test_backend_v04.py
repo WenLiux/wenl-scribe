@@ -15,6 +15,15 @@ SPEC.loader.exec_module(server)
 
 
 class BackendV04Tests(unittest.TestCase):
+    def test_origin_allows_configured_dev_page_and_packaged_app_same_port(self):
+        self.assertTrue(server.is_allowed_origin("http://localhost:3001", 8766))
+        self.assertTrue(server.is_allowed_origin("http://127.0.0.1:3001", 8766))
+        self.assertTrue(server.is_allowed_origin("http://localhost:8766", 8766))
+        self.assertTrue(server.is_allowed_origin("http://127.0.0.1:8766/", 8766))
+        self.assertTrue(server.is_allowed_origin("http://[::1]:8766", 8766))
+        self.assertFalse(server.is_allowed_origin("http://localhost:8765", 8766))
+        self.assertFalse(server.is_allowed_origin("https://example.com", 8766))
+
     def test_resolve_page_defaults_and_normalizes(self):
         self.assertEqual(server.resolve_page("https://www.bilibili.com/video/BV1xx411c7mD?p=3"), 3)
         self.assertEqual(server.resolve_page("https://www.bilibili.com/video/BV1xx411c7mD?p=0"), 1)
@@ -46,6 +55,121 @@ class BackendV04Tests(unittest.TestCase):
         finally:
             server.resolve_bvid = original_resolve_bvid
             server.request_json = original_request_json
+
+    def test_playback_candidates_use_dash_backups_and_rank_audio(self):
+        original_request_json = server.request_json
+        calls = []
+        try:
+            def fake_request(url, **_kwargs):
+                calls.append(url)
+                return {
+                    "code": 0,
+                    "data": {
+                        "dash": {
+                            "audio": [
+                                {
+                                    "id": 30232,
+                                    "bandwidth": 69027,
+                                    "baseUrl": "https://audio-low.example.test/a.m4s",
+                                },
+                                {
+                                    "id": 30280,
+                                    "bandwidth": 83355,
+                                    "baseUrl": "https://audio-primary.example.test/a.m4s",
+                                    "backupUrl": ["https://audio-backup.example.test/a.m4s"],
+                                },
+                            ]
+                        }
+                    },
+                }
+
+            server.request_json = fake_request
+            candidates = server.playback_media_candidates({
+                "bvid": "BV1xx411c7mD",
+                "cid": 123,
+                "source_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            })
+            self.assertEqual(candidates[0]["label"], "audio-30280")
+            self.assertEqual(candidates[0]["urls"], [
+                "https://audio-primary.example.test/a.m4s",
+                "https://audio-backup.example.test/a.m4s",
+            ])
+            self.assertEqual(len(calls), 1)
+        finally:
+            server.request_json = original_request_json
+
+    def test_playback_candidates_fall_back_to_legacy_durl(self):
+        original_request_json = server.request_json
+        try:
+            def fake_request(url, **_kwargs):
+                if "fnval=16" in url:
+                    return {"code": 0, "data": {"dash": {"audio": []}}}
+                return {
+                    "code": 0,
+                    "data": {
+                        "durl": [{
+                            "url": "http://upos.example.test/video.flv",
+                            "backup_url": ["https://backup.example.test/video.flv"],
+                            "size": 2048,
+                        }]
+                    },
+                }
+
+            server.request_json = fake_request
+            candidates = server.playback_media_candidates({
+                "bvid": "BV1xx411c7mD",
+                "cid": 123,
+                "source_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            })
+            self.assertEqual(candidates[0]["kind"], "combined")
+            self.assertEqual(candidates[0]["total_bytes"], 2048)
+            self.assertEqual(candidates[0]["segments"][0], [
+                "https://upos.example.test/video.flv",
+                "https://backup.example.test/video.flv",
+            ])
+        finally:
+            server.request_json = original_request_json
+
+    def test_download_media_retries_transient_cdn_failure(self):
+        original_urlopen = server.urllib.request.urlopen
+        payload = b"audio"
+        calls = []
+
+        class FakeHeaders:
+            def get(self, name, default=None):
+                return str(len(payload)) if name == "Content-Length" else default
+
+        class FakeResponse(io.BytesIO):
+            headers = FakeHeaders()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        def fake_urlopen(*_args, **_kwargs):
+            calls.append(True)
+            if len(calls) == 1:
+                raise urllib.error.URLError("unexpected eof")
+            return FakeResponse(payload)
+
+        try:
+            server.urllib.request.urlopen = fake_urlopen
+            with tempfile.TemporaryDirectory() as directory:
+                path = server.download_media_candidate(
+                    "a" * 32,
+                    {"source_url": "https://www.bilibili.com/video/BV1xx411c7mD"},
+                    {"kind": "audio", "label": "test", "urls": ["https://audio.example.test/a.m4s"], "total_bytes": len(payload)},
+                    lambda *_args: None,
+                )
+                try:
+                    self.assertEqual(pathlib.Path(path).read_bytes(), payload)
+                finally:
+                    pathlib.Path(path).unlink(missing_ok=True)
+            self.assertEqual(len(calls), 2)
+        finally:
+            server.urllib.request.urlopen = original_urlopen
 
     def test_resolve_bilibili_article_and_reject_lookalike_host(self):
         resolved = server.resolve_bilibili_link("【文章分享】 https://www.bilibili.com/opus/1224392457667477526?from=share")

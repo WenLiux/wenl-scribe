@@ -48,6 +48,8 @@ API = "https://api.bilibili.com"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 MODEL_PROBE_MAX_OUTPUT_TOKENS = 256
 MODEL_PROBE_RETRY_OUTPUT_TOKENS = 1024
+MEDIA_DOWNLOAD_RETRIES = 2
+MEDIA_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 ARTICLE_IMAGE_MAX_COUNT = 80
 ARTICLE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
 ARTICLE_PACKAGE_MAX_BYTES = 256 * 1024 * 1024
@@ -83,6 +85,25 @@ ALLOWED_ORIGINS = {
     for origin in (os.getenv("WENL_ALLOWED_ORIGINS") or "http://localhost:3001,http://127.0.0.1:3001").split(",")
     if origin.strip()
 }
+LOCAL_ORIGIN_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def is_allowed_origin(origin, server_port=None):
+    """Allow configured local pages and the packaged app's own local origin."""
+    origin = (origin or "").strip().rstrip("/")
+    if not origin or origin in ALLOWED_ORIGINS:
+        return True
+    if server_port is None:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(origin)
+        return (
+            parsed.scheme == "http"
+            and parsed.hostname in LOCAL_ORIGIN_HOSTS
+            and parsed.port == server_port
+        )
+    except ValueError:
+        return False
 
 MODEL_CACHE = {}
 MODEL_LOCK = threading.Lock()
@@ -169,14 +190,14 @@ def atomic_write_text(path, text):
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(text, encoding="utf-8")
     try:
-        for attempt in range(6):
+        for attempt in range(16):
             try:
                 os.replace(temporary, path)
                 return
             except PermissionError:
-                if attempt == 5:
+                if attempt == 15:
                     raise
-                time.sleep(0.05 * (attempt + 1))
+                time.sleep(min(0.05 * (attempt + 1), 0.5))
     finally:
         if temporary.exists():
             try:
@@ -191,14 +212,14 @@ def atomic_write_bytes(path, raw):
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_bytes(raw)
     try:
-        for attempt in range(6):
+        for attempt in range(16):
             try:
                 os.replace(temporary, path)
                 return
             except PermissionError:
-                if attempt == 5:
+                if attempt == 15:
                     raise
-                time.sleep(0.05 * (attempt + 1))
+                time.sleep(min(0.05 * (attempt + 1), 0.5))
     finally:
         if temporary.exists():
             try:
@@ -681,7 +702,10 @@ def resolve_page(link):
 def get_video(link):
     bvid, resolved_link = resolve_bvid(link)
     page = resolve_page(resolved_link)
-    view = request_json(f"{API}/x/web-interface/view?bvid={bvid}")
+    view = request_json(
+        f"{API}/x/web-interface/view?bvid={bvid}",
+        headers=bilibili_headers(f"https://www.bilibili.com/video/{bvid}"),
+    )
     if view.get("code") != 0:
         raise ValueError("未能读取视频信息。请确认视频存在且可以公开访问。")
     data = view["data"]
@@ -705,52 +729,272 @@ def get_video(link):
 
 def get_subtitles(video):
     endpoint = f"{API}/x/player/v2?bvid={video['bvid']}&cid={video['cid']}"
-    payload = request_json(endpoint)
+    payload = request_json(endpoint, headers=bilibili_headers(video.get("source_url")))
+    if payload.get("code") not in (0, None):
+        return []
     tracks = ((payload.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
     if not tracks:
         return []
     url = tracks[0].get("subtitle_url", "")
     if url.startswith("//"):
         url = "https:" + url
-    subtitle = request_json(url)
+    elif url.startswith("/"):
+        url = urllib.parse.urljoin("https://www.bilibili.com/", url)
+    if not url:
+        return []
+    subtitle = request_json(url, headers=bilibili_headers(video.get("source_url")))
+    if subtitle.get("code") not in (0, None):
+        return []
     return [normalize_segment(item, "public_subtitle") for item in subtitle.get("body", []) if item.get("content")]
+
+
+def bilibili_headers(source_url=None):
+    return {
+        "User-Agent": UA,
+        "Referer": source_url or "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+
+def normalize_media_url(value):
+    url = str(value or "").strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    if parsed.scheme == "http":
+        parsed = parsed._replace(scheme="https")
+        url = urllib.parse.urlunparse(parsed)
+    return url
+
+
+def media_url_options(item, primary_keys=("baseUrl", "base_url", "url")):
+    options = []
+    for key in (*primary_keys, "backupUrl", "backup_url"):
+        raw = item.get(key)
+        values = raw if isinstance(raw, (list, tuple)) else [raw]
+        for value in values:
+            url = normalize_media_url(value)
+            if url and url not in options:
+                options.append(url)
+    return options
+
+
+def playback_media_candidates(video):
+    """Return signed DASH audio or legacy combined-stream candidates.
+
+    Bilibili may return a healthy primary URL together with several CDN backup
+    URLs. It may also omit DASH audio for older/restricted videos and expose a
+    combined stream through ``durl`` instead. Keep both cases in one normalized
+    shape so the downloader can retry without coupling transcription to one CDN.
+    """
+    endpoint = f"{API}/x/player/playurl?bvid={video['bvid']}&cid={video['cid']}&qn=64"
+    errors = []
+    for fnval in (16, 0):
+        try:
+            payload = request_json(
+                f"{endpoint}&fnval={fnval}",
+                headers=bilibili_headers(video.get("source_url")),
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+            continue
+        code = payload.get("code")
+        if code not in (0, None):
+            errors.append(str(payload.get("message") or f"播放接口错误 {code}"))
+            continue
+        data = payload.get("data") or {}
+        dash = data.get("dash") or {}
+        audio = dash.get("audio") or []
+        if isinstance(audio, dict):
+            audio = [audio]
+        audio = sorted(
+            audio,
+            key=lambda item: int(item.get("bandwidth") or 0),
+            reverse=True,
+        )
+        candidates = []
+        for item in audio:
+            urls = media_url_options(item)
+            if urls:
+                candidates.append({
+                    "kind": "audio",
+                    "urls": urls,
+                    "total_bytes": 0,
+                    "label": f"audio-{item.get('id') or 'unknown'}",
+                })
+        if candidates:
+            return candidates
+
+        durls = data.get("durl") or []
+        if isinstance(durls, dict):
+            durls = [durls]
+        segments = []
+        total_bytes = 0
+        for item in durls:
+            urls = media_url_options(item, ("url",))
+            if urls:
+                segments.append(urls)
+                try:
+                    total_bytes += max(0, int(item.get("size") or 0))
+                except (TypeError, ValueError):
+                    pass
+        if segments:
+            return [{
+                "kind": "combined",
+                "segments": segments,
+                "total_bytes": total_bytes,
+                "label": "durl",
+            }]
+        errors.append(str(data.get("message") or "播放接口没有返回音频地址"))
+
+    detail = next((item for item in reversed(errors) if item), "")
+    suffix = f"（{detail}）" if detail else ""
+    raise TaskError(
+        "VIDEO_RESTRICTED",
+        f"未能获取视频音频。视频可能需要登录、付费或存在地区限制{suffix}",
+        "downloading",
+    )
+
+
+def response_length(response):
+    try:
+        value = int(response.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value:
+        return value
+    content_range = str(response.headers.get("Content-Range") or "")
+    match = re.search(r"/(\d+)$", content_range)
+    return int(match.group(1)) if match else 0
+
+
+def download_media_candidate(job_id, video, candidate, progress):
+    """Download one playback candidate, retrying transient CDN failures."""
+    file_descriptor, path = tempfile.mkstemp(suffix=".m4s")
+    os.close(file_descriptor)
+    segments = candidate.get("segments") or [candidate.get("urls") or []]
+    total = int(candidate.get("total_bytes") or 0)
+    downloaded = 0
+    try:
+        with open(path, "wb") as output:
+            for segment_index, options in enumerate(segments):
+                segment_start = downloaded
+                segment_error = None
+                success = False
+                for url in options:
+                    attempts = MEDIA_DOWNLOAD_RETRIES
+                    for attempt in range(attempts):
+                        check_cancel(job_id)
+                        output.seek(segment_start)
+                        output.truncate()
+                        downloaded = segment_start
+                        try:
+                            request = urllib.request.Request(
+                                url,
+                                headers={
+                                    **bilibili_headers(video.get("source_url")),
+                                    "Accept": "*/*",
+                                },
+                            )
+                            with urllib.request.urlopen(request, timeout=180) as response:
+                                expected = response_length(response)
+                                if not total and expected and len(segments) == 1:
+                                    total = expected
+                                segment_bytes = 0
+                                while True:
+                                    check_cancel(job_id)
+                                    chunk = response.read(MEDIA_DOWNLOAD_CHUNK_BYTES)
+                                    if not chunk:
+                                        break
+                                    output.write(chunk)
+                                    segment_bytes += len(chunk)
+                                    downloaded = segment_start + segment_bytes
+                                    if total:
+                                        percent = 20 + min(16, int(downloaded / total * 16))
+                                        progress(
+                                            "downloading",
+                                            f"正在下载音频 {downloaded / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB",
+                                            percent,
+                                            {"bytes_downloaded": downloaded, "bytes_total": total},
+                                        )
+                                if expected and segment_bytes != expected:
+                                    raise OSError(f"音频下载不完整（{segment_bytes}/{expected} 字节）")
+                                if not segment_bytes:
+                                    raise OSError("音频响应为空")
+                            success = True
+                            break
+                        except TaskCancelled:
+                            raise
+                        except urllib.error.HTTPError as exc:
+                            segment_error = exc
+                            if exc.code in (401, 403, 404, 416):
+                                break
+                        except (OSError, urllib.error.URLError) as exc:
+                            segment_error = exc
+                        except Exception as exc:
+                            segment_error = exc
+                        if attempt + 1 < attempts:
+                            time.sleep(0.4 * (attempt + 1))
+                    if success:
+                        break
+                if not success:
+                    raise segment_error or OSError(f"音频第 {segment_index + 1} 段下载失败")
+        if downloaded <= 0:
+            raise OSError("音频响应为空")
+        return path
+    except TaskCancelled:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
 
 
 def transcribe(job_id, video, model_name, language, progress):
     progress("downloading", "正在准备视频音频", 20)
-    play = request_json(f"{API}/x/player/playurl?bvid={video['bvid']}&cid={video['cid']}&qn=64&fnval=16")
-    audio = play.get("data", {}).get("dash", {}).get("audio") or []
-    if not audio:
-        raise TaskError("VIDEO_RESTRICTED", "未能获取视频音频。视频可能需要登录、付费或存在地区限制。", "downloading")
-    audio_url = audio[0].get("baseUrl") or audio[0].get("base_url")
-    req = urllib.request.Request(audio_url, headers={"User-Agent": UA, "Referer": video["source_url"]})
-    with tempfile.NamedTemporaryFile(suffix=".m4s", delete=False) as temp:
-        with urllib.request.urlopen(req, timeout=180) as response:
-            total = int(response.headers.get("Content-Length") or 0)
-            downloaded = 0
-            while True:
-                check_cancel(job_id)
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                temp.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    percent = 20 + int(downloaded / total * 16)
-                    progress("downloading", f"正在下载音频 {downloaded / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB", percent, {"bytes_downloaded": downloaded, "bytes_total": total})
-        path = temp.name
+    candidates = playback_media_candidates(video)
+    path = None
+    download_errors = []
+    for index, candidate in enumerate(candidates):
+        try:
+            path = download_media_candidate(job_id, video, candidate, progress)
+            break
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            download_errors.append(str(exc))
+            log_task(job_id, "audio_download_failed", candidate=candidate.get("label"), error=str(exc))
+    if not path:
+        detail = next((item for item in reversed(download_errors) if item), "未知网络错误")
+        raise TaskError("AUDIO_DOWNLOAD_FAILED", f"无法下载视频音频，请稍后重试。{detail}", "downloading")
     try:
         check_cancel(job_id)
         progress("loading_model", None, 40)
         with MODEL_LOCK:
             if model_name not in MODEL_CACHE:
-                from faster_whisper import WhisperModel
-                MODEL_CACHE[model_name] = WhisperModel(
-                    model_name,
-                    device="cpu",
-                    compute_type="int8",
-                    download_root=str(MODEL_DIR),
-                )
+                try:
+                    from faster_whisper import WhisperModel
+                    MODEL_CACHE[model_name] = WhisperModel(
+                        model_name,
+                        device="cpu",
+                        compute_type="int8",
+                        download_root=str(MODEL_DIR),
+                    )
+                except Exception as exc:
+                    raise TaskError(
+                        "WHISPER_MODEL_LOAD_FAILED",
+                        f"Whisper 模型 {model_name} 加载失败：{exc}",
+                        "loading_model",
+                    ) from exc
             model = MODEL_CACHE[model_name]
         check_cancel(job_id)
         progress("transcribing", "正在识别语音内容", 45)
@@ -2253,12 +2497,11 @@ def retry_job(job_id, from_stage="auto"):
 
 class Handler(BaseHTTPRequestHandler):
     def origin_allowed(self):
-        origin = self.headers.get("Origin", "").strip().rstrip("/")
-        return not origin or origin in ALLOWED_ORIGINS
+        return is_allowed_origin(self.headers.get("Origin", ""), self.server.server_address[1])
 
     def cors(self):
         origin = self.headers.get("Origin", "").strip().rstrip("/")
-        if origin and origin in ALLOWED_ORIGINS:
+        if origin and is_allowed_origin(origin, self.server.server_address[1]):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
